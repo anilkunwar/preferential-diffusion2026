@@ -7,33 +7,28 @@ MAJOR CHANGES in v3
 -------------------
 Bug fixes (from review):
   * handle_errors no longer silently returns None where callers unpack tuples;
-    decorated methods now return a typed sentinel that callers check, or
-    re-raise (configurable). UI-level wrappers catch and display.
+    decorated methods now return a typed sentinel that callers check.
   * Cahn-Hilliard path now auto-substeps to respect a nonlinear CFL.
-  * "FIX C" mass conservation now *actually* rejects blown-up steps
-    (rolls back to the previous c) instead of silently accepting them.
+  * Mass conservation now *actually* rejects blown-up steps.
   * compute_local_grain_size now returns a physically meaningful
     distance-to-nearest-GB-based grain size instead of 2/|∇s|.
   * Plane-strain elastic moduli corrected: C11_2d=C11, C12_2d=C12, C44_2d=C44.
   * Plastic flow direction now uses a J2 return-mapping step driven by the
     local deviatoric stress, not a fixed xx+/yy- direction.
   * torch import wrapped in try/except (like h5py).
-  * Animation vmin/vmax now computed over ALL frames (no clipping drift).
+  * Animation vmin/vmax now computed over ALL frames.
   * export_csv sigma_y branch made reachable.
   * SimulationDatabase gains clear_all() / bounded cache.
 
 Visualization upgrades:
   * Full Visualization Settings tab: global theme, fonts, DPI, colorbar layout.
   * Per-field dynamic range: vmin/vmax overrides, log-norm, colormap invert.
-  * Multi-field overlays: base heatmap + overlay heatmap OR contour lines,
-    with alpha blending and optional grain-map ghosting.
-  * Vector field visualization: quiver (matplotlib) and Plotly cone/scatter
-    for ∇c, ∇σ_h, principal stress directions.
-  * Plotly time-scrubbing animation (frames + slider + play button),
-    no GIF rendering required.
-  * Multi-time line profiles: overlay profiles from multiple frames.
+  * Multi-field overlays: base heatmap + overlay heatmap OR contour lines.
+  * Vector field visualization: quiver + Plotly cone/scatter.
+  * Plotly time-scrubbing animation (frames + slider + play button).
+  * Multi-time line profiles.
   * Animation export: GIF/MP4, watermark, batch (all fields → zip).
-  * Publication-ready matplotlib style presets (including dark mode).
+  * Publication-ready matplotlib style presets.
 """
 
 import numpy as np
@@ -91,7 +86,7 @@ FAILED = _Sentinel()
 
 
 # ============================================================================
-# ERROR HANDLING (BUG FIX P0)
+# ERROR HANDLING
 # ============================================================================
 def handle_errors(func=None, *, re_raise=False):
     """
@@ -340,7 +335,6 @@ def apply_matplotlib_theme(theme_name: str, cfg: dict):
         except Exception as e:
             logger.warning(f"Theme '{style}' unavailable: {e}")
             plt.rcdefaults()
-    # App-level overrides
     mpl.rcParams['axes.titlesize']  = cfg.get('title_font_size', 11)
     mpl.rcParams['axes.labelsize']  = cfg.get('label_font_size', 9)
     mpl.rcParams['xtick.labelsize'] = cfg.get('tick_font_size', 8)
@@ -394,7 +388,6 @@ FIELD_UNITS = {
 
 DISCRETE_FIELDS = {'grain_map', 'phi_gb'}
 
-# Fields suitable for vector-field visualization (they have meaningful gradients)
 VECTOR_FIELD_SOURCES = ['phi', 'sigma_h', 'sigma_eq', 'D_eff', 'phi_gb', 'rho_gnd']
 
 
@@ -425,14 +418,14 @@ def default_viz_config():
             'base': 'sigma_eq',
             'overlay': 'phi_gb',
             'alpha': 0.5,
-            'mode': 'contour',      # 'contour' or 'heatmap'
+            'mode': 'contour',
             'n_contours': 10,
             'show_grain_ghost': False,
         },
         'vector': {
             'enabled': False,
-            'source': 'phi',        # which field to differentiate
-            'mode': 'flux',         # 'flux' (J = -D∇c) or 'gradient' or 'principal_stress'
+            'source': 'phi',
+            'mode': 'flux',
             'density': 24,
             'color': 'white',
             'scale': 1.0,
@@ -694,21 +687,9 @@ class AuCuBondingGeometry:
 
 
 # ============================================================================
-# SPECTRAL ELASTICITY  (BUG FIX: correct plane-strain moduli)
+# SPECTRAL ELASTICITY  (plane-strain moduli corrected)
 # ============================================================================
 class SpectralElasticSolver:
-    """
-    Solve ∇·σ = 0 for σ = C:(ε_total − ε*) via plane-strain Fourier Green's fn.
-
-    BUG FIX: previously used averaged moduli
-        C11_2d = (C11 + C12 + 2 C44)/2,  etc.
-    which is a plane-stress-like blend. For true 2D plane strain on {100}:
-        σ_xx = C11 ε_xx + C12 ε_yy
-        σ_yy = C12 ε_xx + C11 ε_yy
-        σ_xy = 2 C44 ε_xy
-    so we now use (C11, C12, C44) directly.
-    """
-
     def __init__(self, Nx, Ny, dx, dy, elastic_params, kx=None, ky=None, k2=None):
         self.Nx, self.Ny = Nx, Ny
         self.dx, self.dy = dx, dy
@@ -719,7 +700,6 @@ class SpectralElasticSolver:
 
         C11, C12, C44 = (elastic_params['C11'], elastic_params['C12'],
                          elastic_params['C44'])
-        # Correct plane-strain moduli
         self.C11_2d, self.C12_2d, self.C44_2d = C11, C12, C44
         lam = C12
         mu  = C44
@@ -861,14 +841,7 @@ class AuCuBondingSolver:
 
     # ------------------------------------------------------------------
     def compute_local_grain_size(self):
-        """
-        BUG FIX: previous version returned 2/|∇(Ση)| which is an inverse
-        GB-thickness, not a grain size. We now use the distance to the
-        nearest GB pixel (via distance transform) scaled to represent the
-        local grain diameter.
-
-        h(x) ≈ 2 × dist_to_nearest_GB(x)   [nm]
-        """
+        """Distance-to-nearest-GB based grain size: h ≈ 2 × dist."""
         phi_gb = self.compute_gb_indicator()
         gb_mask = phi_gb > 0.5
         if not gb_mask.any():
@@ -909,14 +882,7 @@ class AuCuBondingSolver:
 
     # ------------------------------------------------------------------
     def _cahn_hilliard_step(self, sigma_h, D_eff, Omega):
-        """
-        Cahn-Hilliard step with:
-          * nonlinear CFL auto-substepping (BUG FIX P0)
-          * actual rejection of blown-up steps (rollback to previous c)
-        """
-        # --- CFL for the explicit nonlinear part -------------------------
         dx_min = min(self.dx, self.dy)
-        # dt_cfl ~ dx^2 / (4 M W)   (linearized CH chemical potential)
         M_max = float(np.max(D_eff))
         W_eff = max(abs(self.W), 1e-9)
         dt_cfl = 0.20 * dx_min**2 / max(M_max * W_eff, 1e-12)
@@ -943,42 +909,32 @@ class AuCuBondingSolver:
             denom = 1.0 + dt_sub * self.M_ref * self.kappa_c * self.k2**2
             c_new = np.real(ifft2(fft2(c_expl) / denom))
 
-            # Bounds
             c_clip = np.clip(c_new, 0.0, 1.0)
 
-            # --- BUG FIX: actually reject blown-up steps -----------------
             m_old = float(np.sum(c))
             m_new = float(np.sum(c_clip))
             if m_old < 1e-12:
                 c = c_clip
                 continue
             ratio = m_new / m_old
-            # Reject if the nonlinear explicit part produced a wildly
-            # different mass or a huge local increment.
             max_inc = float(np.max(np.abs(c_clip - c)))
             if ratio < 0.5 or ratio > 2.0 or max_inc > 0.5:
-                # Roll back: keep the previous state, don't apply this step.
                 logger.warning(
                     f"CH substep rejected: mass ratio {ratio:.3e}, "
                     f"max increment {max_inc:.3e}")
-                # Try a half step once
                 c_attempt = self._ch_half_step(c, sigma_h, D_eff, Omega,
                                                 dt_sub * 0.5)
                 if c_attempt is not None:
                     c = c_attempt
-                # else: keep c as-is (skip this substep)
             else:
-                # Small correction
                 c_clip *= m_old / m_new
                 c = np.clip(c_clip, 0.0, 1.0)
 
-        # Final safety: if the whole step went nowhere useful, keep c_start
         if not np.any(np.isfinite(c)):
             return np.clip(c_start, 0.0, 1.0)
         return np.clip(c, 0.0, 1.0)
 
     def _ch_half_step(self, c0, sigma_h, D_eff, Omega, dt_half):
-        """Attempt a single half-size CH substep; return None on failure."""
         try:
             sigma_h_norm = sigma_h / 1e9
             df_dc = self.W * (4.0 * c0**3 - 6.0 * c0**2 + 2.0 * c0)
@@ -1004,10 +960,6 @@ class AuCuBondingSolver:
 
     # ------------------------------------------------------------------
     def _concentration_substep(self, dt, phi_gb, D_lat, delta_D, Omega, sigma_h):
-        """
-        Fickian path. Uses normalized σ_h and *actual* rollback on
-        blow-up (BUG FIX P0).
-        """
         sigma_h_norm = sigma_h / 1e9
 
         c_gx, c_gy = spectral_gradients(self.c, self.kx, self.ky)
@@ -1037,12 +989,10 @@ class AuCuBondingSolver:
         if m_old > 1e-12:
             ratio = m_new / m_old
             max_inc = float(np.max(np.abs(c_new - self.c)))
-            # BUG FIX: actually reject, don't silently accept
             if ratio < 0.1 or ratio > 10.0 or max_inc > 0.5:
                 logger.warning(
                     f"Fickian substep rejected: mass ratio {ratio:.3e}, "
                     f"max increment {max_inc:.3e}")
-                # Fall back to pure lattice diffusion for this substep
                 c_safe = np.real(ifft2(fft2(self.c) / denom))
                 return np.clip(c_safe, 0.0, 1.0)
             c_new *= m_old / m_new
@@ -1062,8 +1012,6 @@ class AuCuBondingSolver:
         sq = [e**2 for e in self.eta_list]
         total_sq = np.sum(sq, axis=0)
 
-        # Use a spatially-averaged L_eff for the implicit stabilizer
-        # (BUG FIX: previously used L_ref only, decoupled from L_eff)
         L_stab = float(np.mean(L_eff))
 
         new_list = []
@@ -1104,10 +1052,7 @@ class AuCuBondingSolver:
 
     # ------------------------------------------------------------------
     def compute_plasticity(self, sigma_eq, sxx, syy, sxy, h):
-        """
-        J2 return mapping (BUG FIX: flow direction driven by local
-        deviatoric stress, not a fixed xx+/yy- increment).
-        """
+        """J2 return-mapping: flow direction driven by local deviatoric stress."""
         pl = self.mat['plasticity']
         mu_p, nu, b = pl['mu'], pl['nu'], pl['b']
         sigma0 = float(self.params.get('sigma0', pl['sigma0']))
@@ -1124,19 +1069,16 @@ class AuCuBondingSolver:
         gamma_dot = gamma0_dot * overstress ** m
         d_gamma = np.minimum(gamma_dot * self.dt, 1e-3)
 
-        # Plane-strain mean: p = (σ_xx + σ_yy) / 2
         p = 0.5 * (sxx + syy)
         s_dev_xx = sxx - p
         s_dev_yy = syy - p
         s_dev_xy = sxy
 
-        # Flow direction n = (3/2) s / σ_eq  (with σ_eq the von Mises)
         denom_eq = np.maximum(sigma_eq, 1e-9)
         n_xx = 1.5 * s_dev_xx / denom_eq
         n_yy = 1.5 * s_dev_yy / denom_eq
         n_xy = 1.5 * s_dev_xy / denom_eq
 
-        # Plastic increment
         d_xx = d_gamma * n_xx
         d_yy = d_gamma * n_yy
         d_xy = d_gamma * n_xy
@@ -1253,7 +1195,7 @@ class AuCuBondingSolver:
 
 
 # ============================================================================
-# LINE PROFILER  (now with multi-time profiles)
+# LINE PROFILER
 # ============================================================================
 class EnhancedLineProfiler:
     def __init__(self, Nx, Ny, dx, dy):
@@ -1321,10 +1263,8 @@ class EnhancedLineProfiler:
 
     @handle_errors
     def extract_profile_at(self, data, x0, y0, x1, y1, n=200):
-        """Extract a profile along an arbitrary segment in physical coords."""
         xs = np.linspace(x0, x1, n)
         ys = np.linspace(y0, y1, n)
-        # Convert to pixel coords
         i = ((xs - self.extent[0]) / self.dx).astype(float)
         j = ((ys - self.extent[2]) / self.dy).astype(float)
         i = np.clip(i, 0, self.Nx - 1)
@@ -1343,7 +1283,7 @@ class EnhancedLineProfiler:
 
 
 # ============================================================================
-# FIELD RESCALING HELPER
+# FIELD RESCALING HELPERS
 # ============================================================================
 def _rescale_field(field_name, data):
     d = data.copy()
@@ -1355,10 +1295,6 @@ def _rescale_field(field_name, data):
 
 
 def compute_field_norm(field_name, data, fs):
-    """
-    Given per-field visualization settings, return (norm, vmin, vmax).
-    norm is a matplotlib Normalize/LogNorm or None for auto.
-    """
     if fs is None:
         fs = {}
     auto = fs.get('auto', True)
@@ -1405,25 +1341,12 @@ def compute_field_norm(field_name, data, fs):
 # VECTOR FIELD COMPUTATION
 # ============================================================================
 def compute_vector_field(results_dict, source, mode='gradient'):
-    """
-    Compute a 2-component vector field from the results.
-    Returns (vx, vy) in the grid's native shape.
-
-    mode = 'gradient'         → (∂f/∂x, ∂f/∂y)
-    mode = 'flux'             → -D_eff ∇f  (only meaningful for phi)
-    mode = 'principal_stress' → (cos θ1, sin θ1) of major principal stress
-    """
-    Nx = results_dict.get('phi').shape[1]
-    Ny = results_dict.get('phi').shape[0]
-    dx = 1.0
-    # Use finite differences (we don't have k vectors here)
     if mode == 'principal_stress':
         sxx = results_dict.get('sxx')
         syy = results_dict.get('syy')
         sxy = results_dict.get('sxy')
         if sxx is None or syy is None or sxy is None:
             return None, None
-        # Principal stress angle: θ = 0.5 atan2(2 sxy, sxx - syy)
         theta = 0.5 * np.arctan2(2 * sxy, sxx - syy)
         vx = np.cos(theta)
         vy = np.sin(theta)
@@ -1435,7 +1358,6 @@ def compute_vector_field(results_dict, source, mode='gradient'):
 
     gy, gx = np.gradient(f)
     if mode == 'flux':
-        # J = -D ∇c
         D = results_dict.get('D_eff')
         if D is None:
             D = np.ones_like(f)
@@ -1447,7 +1369,7 @@ def compute_vector_field(results_dict, source, mode='gradient'):
 
 
 # ============================================================================
-# VISUALIZER  (major upgrade)
+# VISUALIZER
 # ============================================================================
 class EnhancedTwinVisualizer:
     def __init__(self, Nx, Ny, dx, dy=None, dt=1e-4):
@@ -1461,8 +1383,6 @@ class EnhancedTwinVisualizer:
     def get_colormap(self, name, invert=False):
         return ColormapRegistry.resolve(name, invert=invert)
 
-    # ------------------------------------------------------------------
-    # MULTI-FIELD COMPARISON
     # ------------------------------------------------------------------
     @handle_errors
     def create_multi_field_comparison(self, results_dict, style_params=None):
@@ -1547,17 +1467,11 @@ class EnhancedTwinVisualizer:
         return fig
 
     # ------------------------------------------------------------------
-    # OVERLAY  (new)
-    # ------------------------------------------------------------------
     @handle_errors
     def create_overlay(self, results_dict, base_field, overlay_field,
                        alpha=0.5, mode='contour', n_contours=10,
                        show_grain_ghost=False, grain_map=None,
                        style_params=None):
-        """
-        Composite visualization: base field as heatmap, overlay field as
-        contour lines (default) or as an alpha-blended heatmap.
-        """
         if style_params is None:
             style_params = {}
         field_settings = style_params.get('field_settings', {})
@@ -1580,7 +1494,6 @@ class EnhancedTwinVisualizer:
 
         fig, ax = plt.subplots(figsize=(11, 5.5))
 
-        # Base layer
         if base_field in DISCRETE_FIELDS:
             im_base = ax.imshow(base, extent=self.extent, cmap=base_cmap,
                                 origin='lower', aspect='equal',
@@ -1597,14 +1510,13 @@ class EnhancedTwinVisualizer:
                                     origin='lower', aspect='equal',
                                     interpolation='bilinear')
 
-        # Optional grain-map ghost
         if show_grain_ghost and grain_map is not None:
             ghost = np.where(grain_map < 0, np.nan, grain_map)
-            ax.imshow(ghost, extent=self.extent, cmap=ColormapRegistry.resolve('grain_map'),
+            ax.imshow(ghost, extent=self.extent,
+                      cmap=ColormapRegistry.resolve('grain_map'),
                       origin='lower', aspect='equal', interpolation='nearest',
                       alpha=0.25 * alpha)
 
-        # Overlay layer
         if mode == 'contour':
             ov_cmap = self.get_colormap(
                 colormaps.get(overlay_field,
@@ -1646,15 +1558,10 @@ class EnhancedTwinVisualizer:
         return fig
 
     # ------------------------------------------------------------------
-    # VECTOR FIELD OVERLAY  (new)
-    # ------------------------------------------------------------------
     @handle_errors
     def create_vector_overlay(self, results_dict, source, mode='gradient',
                               density=24, color='white', scale=1.0,
                               base_field=None, style_params=None):
-        """
-        Draw a quiver vector field on top of an optional scalar heatmap.
-        """
         if style_params is None:
             style_params = {}
         field_settings = style_params.get('field_settings', {})
@@ -1688,7 +1595,6 @@ class EnhancedTwinVisualizer:
         else:
             ax.set_facecolor('#111111')
 
-        # Downsample for quiver
         step = max(1, self.Nx // max(density, 1))
         x = np.linspace(self.extent[0], self.extent[1], self.Nx)[::step]
         y = np.linspace(self.extent[2], self.extent[3], self.Ny)[::step]
@@ -1696,7 +1602,6 @@ class EnhancedTwinVisualizer:
         U = vx[::step, ::step] * scale
         V = vy[::step, ::step] * scale
 
-        # Normalize for visibility
         mag = np.sqrt(U**2 + V**2) + 1e-12
         U_n = U / mag
         V_n = V / mag
@@ -1710,8 +1615,6 @@ class EnhancedTwinVisualizer:
         plt.tight_layout()
         return fig
 
-    # ------------------------------------------------------------------
-    # PLOTLY HEATMAP  (log support, inversion)
     # ------------------------------------------------------------------
     @handle_errors
     def create_plotly_heatmap(self, results_dict, field_name, frame_idx=0,
@@ -1728,7 +1631,6 @@ class EnhancedTwinVisualizer:
 
         norm, vmin, vmax = compute_field_norm(field_name, d, fs)
 
-        # Plotly log: apply log10 to z if requested (with clipping)
         z = d
         if fs.get('log', False):
             pos = d > 0
@@ -1753,8 +1655,6 @@ class EnhancedTwinVisualizer:
                           width=700, height=500, template="plotly_white")
         return fig
 
-    # ------------------------------------------------------------------
-    # PLOTLY 3D SURFACE  (with contours)
     # ------------------------------------------------------------------
     @handle_errors
     def create_plotly_3d_surface(self, results_dict, field_name, frame_idx=0,
@@ -1791,8 +1691,6 @@ class EnhancedTwinVisualizer:
         return fig
 
     # ------------------------------------------------------------------
-    # PLOTLY LINE PROFILES
-    # ------------------------------------------------------------------
     @handle_errors
     def create_plotly_line_profiles(self, results_dict, field_name, profile_types,
                                     position_ratio=0.5, viz_cfg=None):
@@ -1814,8 +1712,6 @@ class EnhancedTwinVisualizer:
         return fig
 
     # ------------------------------------------------------------------
-    # MULTI-TIME PROFILES  (new)
-    # ------------------------------------------------------------------
     @handle_errors
     def create_multi_time_profiles(self, history, field_name, ptype='horizontal',
                                    frames=None, position_ratio=0.5,
@@ -1826,42 +1722,45 @@ class EnhancedTwinVisualizer:
         if not frames:
             return None
 
-        fig = go.Figure() if use_plotly else plt.figure(figsize=(11, 4.5)).gca()
-        cmap = plt.cm.viridis if not use_plotly else None
-        n = len(frames)
-        for k, f in enumerate(frames):
-            d, unit = _rescale_field(field_name, history[f][field_name])
-            res = self.line_profiler.extract_profile(d, ptype, position_ratio)
-            if res is FAILED or res is None:
-                continue
-            dist, prof, _ = res
-            if dist is None:
-                continue
-            if use_plotly:
+        if use_plotly:
+            fig = go.Figure()
+            for f in frames:
+                d, unit = _rescale_field(field_name, history[f][field_name])
+                res = self.line_profiler.extract_profile(d, ptype, position_ratio)
+                if res is FAILED or res is None:
+                    continue
+                dist, prof, _ = res
+                if dist is None:
+                    continue
                 fig.add_trace(go.Scatter(x=dist, y=prof, mode='lines',
                                          name=f"Frame {f}"))
-            else:
-                color = cmap(k / max(n - 1, 1))
-                fig.plot(dist, prof, color=color, lw=1.8,
-                         label=f"Frame {f}")
-
-        if use_plotly:
             fig.update_layout(title=f"{field_name} — multi-time {ptype}",
                               xaxis_title="Position (nm)",
                               yaxis_title=f"{field_name}",
                               hovermode='x unified', template="plotly_white")
             return fig
         else:
-            fig.set_xlabel('Position (nm)')
-            fig.set_ylabel(f'{field_name}')
-            fig.set_title(f'{field_name} — multi-time {ptype}')
-            fig.grid(True, alpha=0.3)
-            fig.legend(loc='best', fontsize=8)
+            fig, ax = plt.subplots(figsize=(11, 4.5))
+            cmap = plt.cm.viridis
+            n = len(frames)
+            for k, f in enumerate(frames):
+                d, unit = _rescale_field(field_name, history[f][field_name])
+                res = self.line_profiler.extract_profile(d, ptype, position_ratio)
+                if res is FAILED or res is None:
+                    continue
+                dist, prof, _ = res
+                if dist is None:
+                    continue
+                color = cmap(k / max(n - 1, 1))
+                ax.plot(dist, prof, color=color, lw=1.8, label=f"Frame {f}")
+            ax.set_xlabel('Position (nm)')
+            ax.set_ylabel(f'{field_name}')
+            ax.set_title(f'{field_name} — multi-time {ptype}')
+            ax.grid(True, alpha=0.3)
+            ax.legend(loc='best', fontsize=8)
             plt.tight_layout()
-            return fig.figure
+            return fig
 
-    # ------------------------------------------------------------------
-    # PLOTLY TIME-SCRUBBING ANIMATION  (new)
     # ------------------------------------------------------------------
     @handle_errors
     def create_plotly_animation(self, history, field_name, dt,
@@ -1875,7 +1774,6 @@ class EnhancedTwinVisualizer:
         chosen = cmap_name or FIELD_DEFAULT_CMAPS.get(field_name, 'viridis')
         colorscale = ColormapRegistry.to_plotly(chosen, invert=fs.get('invert', False))
 
-        # Global range across all frames (BUG FIX for clipping drift)
         d0, unit = _rescale_field(field_name, history[0][field_name])
         if field_name in ('phi', 'eta_poly', 'eta_au', 'eta_nc', 'phi_gb'):
             zmin, zmax = 0, 1
@@ -1943,8 +1841,6 @@ class EnhancedTwinVisualizer:
         return fig
 
     # ------------------------------------------------------------------
-    # STATIC ANIMATION (matplotlib GIF/MP4)  with watermark + global range
-    # ------------------------------------------------------------------
     @handle_errors
     def create_animation_buffer(self, history, field_name, dt,
                                 output_format='gif', fps=5, dpi=120,
@@ -1963,7 +1859,6 @@ class EnhancedTwinVisualizer:
             cmap_name or FIELD_DEFAULT_CMAPS.get(field_name, 'viridis'),
             invert=fs.get('invert', False))
 
-        # Global vmin/vmax across all frames
         d0, unit = _rescale_field(field_name, history[0][field_name])
         if field_name in ('phi', 'eta_poly', 'eta_au', 'eta_nc', 'phi_gb'):
             vmin, vmax = 0, 1
@@ -2066,9 +1961,11 @@ class DataExporter:
                 if isinstance(v, np.ndarray):
                     frame_out[k] = torch.from_numpy(np.asarray(v))
                 elif isinstance(v, dict):
-                    frame_out[k] = {kk: (torch.from_numpy(np.asarray(vv))
-                                          if isinstance(vv, np.ndarray) else vv)
-                                    for kk, vv in v.items()}
+                    frame_out[k] = {
+                        kk: (torch.from_numpy(np.asarray(vv))
+                             if isinstance(vv, np.ndarray) else vv)
+                        for kk, vv in v.items()
+                    }
             out['history'].append(frame_out)
         torch.save(out, buf)
         buf.seek(0)
@@ -2092,7 +1989,6 @@ class DataExporter:
     @staticmethod
     @handle_errors
     def export_csv(history, name, extent, Nx, Ny, dx, dy):
-        """BUG FIX: include sigma_y in the tuple so its branch is reachable."""
         buf = BytesIO()
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
             x = np.linspace(extent[0], extent[1], Nx)
@@ -2139,10 +2035,10 @@ class DataExporter:
 
 
 # ============================================================================
-# SIMULATION DATABASE  (with clear / bounded cache)
+# SIMULATION DATABASE
 # ============================================================================
 class SimulationDatabase:
-    MAX_SIMS = 32   # BUG FIX P3: bounded cache
+    MAX_SIMS = 32
 
     @staticmethod
     def _hash(params):
@@ -2165,7 +2061,6 @@ class SimulationDatabase:
                                       'run_time': run_time},
             'created_at': datetime.now().isoformat(),
         }
-        # Enforce bound: drop oldest if too many
         if len(st.session_state.sims) > SimulationDatabase.MAX_SIMS:
             oldest = min(st.session_state.sims.items(),
                          key=lambda kv: kv[1].get('created_at', ''))
@@ -2208,7 +2103,7 @@ class SimulationDatabase:
 
 
 # ============================================================================
-# ANIMATION HELPER (kept for backward compat — delegates to visualizer)
+# ANIMATION HELPER (backward compat)
 # ============================================================================
 @handle_errors
 def make_animation(history, field_name, dt, extent, Nx, Ny, output_format='gif',
@@ -2232,7 +2127,6 @@ def main():
         page_title="Au-Cu Diffusion Bonding (Rectangular MPF)",
         layout="wide", initial_sidebar_state="expanded")
 
-    # Initialize visualization config
     viz_cfg = get_viz_config()
     apply_matplotlib_theme(viz_cfg['theme'], viz_cfg)
 
@@ -2411,7 +2305,6 @@ def main():
                 st.session_state.compare_ids = [sims[names.index(n)]['id']
                                                  for n in picked]
 
-        # Database utilities
         st.markdown("---")
         with st.expander("🗄️ Simulation database", expanded=False):
             n_sims = len(SimulationDatabase.all())
@@ -2437,8 +2330,888 @@ def main():
         # ---- Geometry ----------------------------------------------
         with tabs[0]:
             st.header("Initial 3-Layer Geometry (Rectangular)")
-            st.caption(f"Poly-Cu: {meta['n_poly']} coarse grain(s) · "
-                       f"Au: 1 flat slab · nc-Cu: {meta['n_nc']} fine grains · "
-                       f"Total = {meta['n_total']} phases")
-            st.caption(f"Domain: {Nx*dx:.1f} nm × {Ny*dy:.1f} nm  |  "
-                       f"grid: {Nx} × {Ny
+            st.caption(
+                f"Poly-Cu: {meta['n_poly']} coarse grain(s) · "
+                f"Au: 1 flat slab · nc-Cu: {meta['n_nc']} fine grains · "
+                f"Total = {meta['n_total']} phases")
+            st.caption(
+                f"Domain: {Nx*dx:.1f} nm × {Ny*dy:.1f} nm  |  "
+                f"grid: {Nx} × {Ny}")
+
+            extent = [-Nx*dx/2, Nx*dx/2, -Ny*dy/2, Ny*dy/2]
+            x_coords = np.linspace(extent[0], extent[1], Nx)
+            gm = st.session_state.gm0
+
+            fig, ax = plt.subplots(figsize=(10, 4.5))
+            cmap = ColormapRegistry.resolve('grain_map')
+            im = ax.imshow(gm, extent=extent, origin='lower', cmap=cmap,
+                           interpolation='nearest', aspect='equal')
+
+            _plot_interface(ax, x_coords, meta['y_poly_bot_eff'],
+                            color='white', lw=1.5, ls='--',
+                            label='Poly-Cu / Au interface')
+            _plot_interface(ax, x_coords, meta['y_au_bot_eff'],
+                            color='yellow', lw=2.0,
+                            label='Au / nc-Cu interface')
+
+            ax.set_title(
+                f"Voronoi grain map — Poly-Cu: {meta['n_poly']} grain(s), "
+                f"nc-Cu: {meta['n_nc']} grains")
+            ax.set_xlabel('x (nm)'); ax.set_ylabel('y (nm)')
+            ax.legend(loc='upper right', framealpha=0.85)
+            st.pyplot(fig); plt.close(fig)
+
+            c0 = st.session_state.c0
+            fig, ax = plt.subplots(figsize=(10, 4.5))
+            fs_phi = viz_cfg['field_settings'].get('phi', {})
+            cmap_c = ColormapRegistry.resolve(
+                FIELD_DEFAULT_CMAPS['phi'],
+                invert=fs_phi.get('invert', False))
+            im = ax.imshow(c0, extent=extent, origin='lower', cmap=cmap_c,
+                           vmin=0, vmax=1, aspect='equal')
+            _plot_interface(ax, x_coords, meta['y_poly_bot_eff'],
+                            color='white', lw=1.5, ls='--')
+            _plot_interface(ax, x_coords, meta['y_au_bot_eff'],
+                            color='yellow', lw=2.0)
+            plt.colorbar(im, ax=ax, label='c (Au)')
+            ax.set_title(
+                f"Initial Au concentration · film thickness ≈ "
+                f"{meta['y_poly_bot']-meta['y_au_bot']:.1f} nm")
+            ax.set_xlabel('x (nm)'); ax.set_ylabel('y (nm)')
+            st.pyplot(fig); plt.close(fig)
+
+            with st.expander("Individual Poly-Cu η fields", expanded=False):
+                eta0 = st.session_state.eta0
+                n_show = min(int(meta['n_poly']), 5)
+                if n_show > 0:
+                    fig, axes = plt.subplots(1, n_show,
+                                              figsize=(4.5 * n_show, 4.0))
+                    axes = np.atleast_1d(axes)
+                    for i in range(n_show):
+                        axes[i].imshow(eta0[i], extent=extent, origin='lower',
+                                       cmap='Blues', vmin=0, vmax=1,
+                                       aspect='equal')
+                        axes[i].set_title(f"η_{i} (Poly grain {i+1})")
+                        axes[i].set_xlabel('x (nm)')
+                        axes[i].set_ylabel('y (nm)')
+                    plt.tight_layout()
+                    st.pyplot(fig); plt.close(fig)
+
+        # ---- Run ---------------------------------------------------
+        with tabs[1]:
+            st.header("Run the MPF Simulation")
+            col1, col2 = st.columns([2, 1])
+            with col1:
+                ch_status = ('ON (uses W)' if params.get('use_cahn_hilliard')
+                             else 'OFF (Fickian)')
+                st.markdown(
+                    f"**Expected physics with current settings:**\n"
+                    f"- D_lattice = `{params['D_lattice']:.4f}`, "
+                    f"D_gb = `{params['D_gb']:.1f}`\n"
+                    f"- Ω (stress drift) = `{params['Omega']:.3f}` "
+                    f"(σ_h normalized by 1 GPa)\n"
+                    f"- Cahn-Hilliard mode = `{ch_status}`\n"
+                    f"- Applied stress = `{params['applied_stress']/1e6:.0f} MPa @ `"
+                    f"`{params['applied_stress_angle']:.0f}°`\n"
+                    f"- Au-Cu misfit β = `{params['misfit_beta']:.3f}`\n"
+                    f"- Solute drag α = `{params['alpha_drag']:.0f}`\n"
+                    f"- Poly-Cu grains = `{params['n_poly_grains']}`\n"
+                    f"- Steps × dt = `{params['n_steps']} × {params['dt']:.4f} ns`"
+                    f" = `{params['n_steps']*params['dt']:.3f} ns` total")
+            if st.button("▶️ Start Evolution", type="primary",
+                         use_container_width=True):
+                with st.spinner("Simulating MPF + Fickian/Hart + Solute Drag..."):
+                    solver = AuCuBondingSolver(params)
+                    solver.c = st.session_state.c0.copy()
+                    solver.eta_list = [e.copy() for e in st.session_state.eta0]
+
+                    n_steps = params['n_steps']
+                    save_freq = params['save_frequency']
+                    history, timesteps = [], []
+                    progress = st.progress(0)
+                    status = st.empty()
+
+                    for step in range(n_steps):
+                        res = solver.step()
+                        if res is FAILED or res is None:
+                            st.error(f"Solver step failed: {FAILED.reason}")
+                            break
+                        if step % save_freq == 0 or step == n_steps - 1:
+                            history.append({
+                                k: (v.copy() if isinstance(v, np.ndarray)
+                                    else (dict(v) if isinstance(v, dict) else v))
+                                for k, v in res.items()
+                            })
+                            timesteps.append(step * params['dt'])
+                        progress.progress((step + 1) / n_steps)
+                        if step % max(1, n_steps // 20) == 0:
+                            mass_ratio = (solver.history['au_mass'][-1] /
+                                          max(solver.history['au_mass'][0], 1e-12))
+                            status.text(
+                                f"Step {step+1}/{n_steps} · "
+                                f"c_top={solver.history['c_top'][-1]:.4f} · "
+                                f"c_bot={solver.history['c_bot'][-1]:.4f} · "
+                                f"Δc="
+                                f"{solver.history['c_bot'][-1]-solver.history['c_top'][-1]:+.4f} · "
+                                f"mass/init={mass_ratio:.4f}")
+
+                    st.success(f"✅ Done. {len(history)} frames saved.")
+                    st.session_state.history = history
+                    st.session_state.timesteps = timesteps
+                    st.session_state.solver = solver
+                    sid = SimulationDatabase.save(params, history, None,
+                                                   run_time=n_steps * params['dt'])
+                    st.session_state.last_sid = sid
+                    st.balloons()
+
+        # ---- Visualization Settings --------------------------------
+        with tabs[2]:
+            st.header("🎨 Visualization Settings")
+            st.caption("These settings apply to the Results, Line Profiles, "
+                       "Plotly, and Export tabs.")
+
+            sub1, sub2 = st.tabs(["Global & Field Scaling",
+                                   "Overlay & Vector & Animation"])
+
+            # ---------- Global & Field Scaling ----------
+            with sub1:
+                st.subheader("🖌️ Global matplotlib theme")
+                theme_keys = list(MATPLOTLIB_THEMES.keys())
+                default_theme_idx = (theme_keys.index(viz_cfg['theme'])
+                                     if viz_cfg['theme'] in theme_keys else 0)
+                c1, c2, c3 = st.columns(3)
+                with c1:
+                    theme = st.selectbox(
+                        "Theme", theme_keys,
+                        index=default_theme_idx,
+                        key="viz_theme")
+                with c2:
+                    title_fs = st.slider("Title font size",
+                                          6, 24, int(viz_cfg['title_font_size']),
+                                          key="viz_title_fs")
+                    label_fs = st.slider("Axis label font size",
+                                          6, 20, int(viz_cfg['label_font_size']),
+                                          key="viz_label_fs")
+                with c3:
+                    tick_fs = st.slider("Tick font size",
+                                        4, 18, int(viz_cfg['tick_font_size']),
+                                        key="viz_tick_fs")
+                    legend_fs = st.slider("Legend font size",
+                                          4, 18, int(viz_cfg['legend_font_size']),
+                                          key="viz_legend_fs")
+                dpi = st.slider("DPI (matplotlib figures & exports)",
+                                72, 600, int(viz_cfg['dpi']), 12,
+                                key="viz_dpi")
+                cb1, cb2 = st.columns(2)
+                with cb1:
+                    cb_frac = st.slider("Colorbar fraction",
+                                         0.02, 0.15,
+                                         float(viz_cfg['colorbar_fraction']),
+                                         0.005, key="viz_cb_frac")
+                with cb2:
+                    cb_pad = st.slider("Colorbar pad",
+                                        0.01, 0.15,
+                                        float(viz_cfg['colorbar_pad']),
+                                        0.005, key="viz_cb_pad")
+
+                if st.button("♻️ Apply theme now", key="viz_apply_theme"):
+                    viz_cfg['theme'] = theme
+                    viz_cfg['title_font_size'] = title_fs
+                    viz_cfg['label_font_size'] = label_fs
+                    viz_cfg['tick_font_size'] = tick_fs
+                    viz_cfg['legend_font_size'] = legend_fs
+                    viz_cfg['dpi'] = dpi
+                    viz_cfg['colorbar_fraction'] = cb_frac
+                    viz_cfg['colorbar_pad'] = cb_pad
+                    apply_matplotlib_theme(theme, viz_cfg)
+                    st.success("Theme applied.")
+                    st.rerun()
+
+                st.markdown("---")
+                st.subheader("📏 Per-field dynamic range & scaling")
+                field_keys = list(FIELD_DEFAULT_CMAPS.keys())
+                field_choice = st.selectbox(
+                    "Field to configure", field_keys,
+                    key="viz_field_choice")
+                fs = viz_cfg['field_settings'][field_choice]
+
+                auto = st.checkbox("Auto range (2–98 percentile)",
+                                    value=fs.get('auto', True),
+                                    key=f"viz_auto_{field_choice}")
+                if not auto:
+                    c1, c2 = st.columns(2)
+                    vmin_in = c1.number_input(
+                        "vmin",
+                        value=float(fs.get('vmin') if fs.get('vmin') is not None else 0.0),
+                        key=f"viz_vmin_{field_choice}", format="%.6g")
+                    vmax_in = c2.number_input(
+                        "vmax",
+                        value=float(fs.get('vmax') if fs.get('vmax') is not None else 1.0),
+                        key=f"viz_vmax_{field_choice}", format="%.6g")
+                else:
+                    vmin_in, vmax_in = None, None
+
+                col_log, col_inv = st.columns(2)
+                with col_log:
+                    log_scale = st.checkbox(
+                        "Logarithmic scale",
+                        value=fs.get('log', False),
+                        key=f"viz_log_{field_choice}",
+                        help="Best for D_eff, rho_gnd; values ≤ 0 are clipped.")
+                with col_inv:
+                    invert = st.checkbox(
+                        "Invert colormap",
+                        value=fs.get('invert', False),
+                        key=f"viz_inv_{field_choice}")
+
+                if st.button("💾 Save field settings",
+                              key=f"viz_save_{field_choice}"):
+                    viz_cfg['field_settings'][field_choice] = {
+                        'auto': auto,
+                        'vmin': vmin_in,
+                        'vmax': vmax_in,
+                        'log': log_scale,
+                        'invert': invert,
+                    }
+                    st.success(f"Saved settings for '{field_choice}'.")
+                    st.rerun()
+
+                if 'history' in st.session_state and st.session_state.history:
+                    idx_prev = st.slider("Preview frame", 0,
+                                          len(st.session_state.history) - 1,
+                                          len(st.session_state.history) - 1,
+                                          key="viz_prev_frame")
+                    d_prev, unit_prev = _rescale_field(
+                        field_choice,
+                        st.session_state.history[idx_prev][field_choice])
+                    fig, ax = plt.subplots(figsize=(8, 4.0))
+                    fs_prev = viz_cfg['field_settings'][field_choice]
+                    cmap_prev = ColormapRegistry.resolve(
+                        FIELD_DEFAULT_CMAPS.get(field_choice, 'viridis'),
+                        invert=fs_prev.get('invert', False))
+                    prev_extent = [-Nx*dx/2, Nx*dx/2, -Ny*dy/2, Ny*dy/2]
+                    if field_choice in DISCRETE_FIELDS:
+                        ax.imshow(d_prev, extent=prev_extent,
+                                  origin='lower', cmap=cmap_prev,
+                                  interpolation='nearest', aspect='equal')
+                    else:
+                        norm, vmin, vmax = compute_field_norm(
+                            field_choice, d_prev, fs_prev)
+                        if norm is not None:
+                            im = ax.imshow(d_prev, extent=prev_extent,
+                                            origin='lower', cmap=cmap_prev,
+                                            norm=norm, interpolation='bilinear',
+                                            aspect='equal')
+                        else:
+                            im = ax.imshow(d_prev, extent=prev_extent,
+                                            origin='lower', cmap=cmap_prev,
+                                            vmin=vmin, vmax=vmax,
+                                            interpolation='bilinear',
+                                            aspect='equal')
+                        plt.colorbar(im, ax=ax,
+                                     label=f"{field_choice} ({unit_prev})")
+                    ax.set_title(f"Preview: {field_choice}")
+                    ax.set_xlabel('x (nm)'); ax.set_ylabel('y (nm)')
+                    st.pyplot(fig); plt.close(fig)
+
+            # ---------- Overlay & Vector & Animation ----------
+            with sub2:
+                st.subheader("🪟 Multi-field overlay builder")
+                ov = viz_cfg['overlay']
+                ov_enabled = st.checkbox("Enable overlay mode in Results",
+                                          value=ov['enabled'], key="ov_en")
+                field_keys2 = list(FIELD_DEFAULT_CMAPS.keys())
+                c1, c2 = st.columns(2)
+                with c1:
+                    base_idx = (field_keys2.index(ov['base'])
+                                if ov['base'] in field_keys2 else 7)
+                    ov_base = st.selectbox("Base field", field_keys2,
+                                            index=base_idx, key="ov_base")
+                with c2:
+                    over_idx = (field_keys2.index(ov['overlay'])
+                                if ov['overlay'] in field_keys2 else 5)
+                    ov_over = st.selectbox("Overlay field", field_keys2,
+                                            index=over_idx, key="ov_over")
+                c1, c2 = st.columns(2)
+                with c1:
+                    ov_mode = st.radio("Overlay mode",
+                                        ['contour', 'heatmap'],
+                                        index=0 if ov['mode'] == 'contour' else 1,
+                                        key="ov_mode")
+                with c2:
+                    ov_alpha = st.slider("Alpha", 0.05, 1.0,
+                                          float(ov['alpha']), 0.05,
+                                          key="ov_alpha")
+                ov_nc = st.slider("Contour levels", 3, 30,
+                                   int(ov['n_contours']), 1, key="ov_nc")
+                ov_ghost = st.checkbox("Ghost grain-map underneath",
+                                        value=ov['show_grain_ghost'],
+                                        key="ov_ghost")
+                if st.button("💾 Save overlay settings", key="ov_save"):
+                    viz_cfg['overlay'] = {
+                        'enabled': ov_enabled, 'base': ov_base,
+                        'overlay': ov_over, 'alpha': ov_alpha,
+                        'mode': ov_mode, 'n_contours': ov_nc,
+                        'show_grain_ghost': ov_ghost,
+                    }
+                    st.success("Overlay settings saved.")
+                    st.rerun()
+
+                st.markdown("---")
+                st.subheader("🧭 Vector field overlay")
+                vv = viz_cfg['vector']
+                vv_enabled = st.checkbox("Enable vector-field mode",
+                                          value=vv['enabled'], key="vv_en")
+                c1, c2 = st.columns(2)
+                with c1:
+                    vv_src_idx = (VECTOR_FIELD_SOURCES.index(vv['source'])
+                                  if vv['source'] in VECTOR_FIELD_SOURCES else 0)
+                    vv_source = st.selectbox("Source field",
+                                              VECTOR_FIELD_SOURCES,
+                                              index=vv_src_idx,
+                                              key="vv_src")
+                with c2:
+                    vv_mode_list = ['gradient', 'flux', 'principal_stress']
+                    vv_m_idx = (vv_mode_list.index(vv['mode'])
+                                if vv['mode'] in vv_mode_list else 0)
+                    vv_mode = st.selectbox("Mode", vv_mode_list,
+                                            index=vv_m_idx,
+                                            key="vv_mode")
+                c1, c2 = st.columns(2)
+                with c1:
+                    vv_density = st.slider("Arrow density", 6, 80,
+                                            int(vv['density']), 2, key="vv_den")
+                with c2:
+                    vv_scale = st.slider("Arrow scale", 0.1, 5.0,
+                                          float(vv['scale']), 0.1, key="vv_scale")
+                vv_color = st.color_picker("Arrow color",
+                                            value='#ffffff' if vv['color'] == 'white' else vv['color'],
+                                            key="vv_col")
+                if st.button("💾 Save vector settings", key="vv_save"):
+                    viz_cfg['vector'] = {
+                        'enabled': vv_enabled, 'source': vv_source,
+                        'mode': vv_mode, 'density': vv_density,
+                        'color': vv_color, 'scale': vv_scale,
+                    }
+                    st.success("Vector settings saved.")
+                    st.rerun()
+
+                st.markdown("---")
+                st.subheader("🎬 Animation settings")
+                an = viz_cfg['animation']
+                c1, c2, c3 = st.columns(3)
+                with c1:
+                    an_fmt = st.selectbox("Format", ['gif', 'mp4'],
+                                           index=0 if an['format'] == 'gif' else 1,
+                                           key="an_fmt")
+                with c2:
+                    an_fps = st.slider("FPS", 1, 30, int(an['fps']), 1,
+                                        key="an_fps")
+                with c3:
+                    an_dpi = st.slider("DPI", 72, 400, int(an['dpi']), 12,
+                                        key="an_dpi")
+                an_wm = st.checkbox("Show watermark",
+                                     value=an['watermark'], key="an_wm")
+                an_wm_text = st.text_input("Watermark text",
+                                            value=an['watermark_text'],
+                                            key="an_wm_text")
+                wm_pos_list = ['lower right', 'lower left', 'upper right', 'upper left']
+                wm_idx = (wm_pos_list.index(an['watermark_pos'])
+                          if an['watermark_pos'] in wm_pos_list else 0)
+                an_wm_pos = st.selectbox("Watermark position",
+                                          wm_pos_list,
+                                          index=wm_idx,
+                                          key="an_wm_pos")
+                if st.button("💾 Save animation settings", key="an_save"):
+                    viz_cfg['animation'] = {
+                        'format': an_fmt, 'fps': an_fps, 'dpi': an_dpi,
+                        'watermark': an_wm, 'watermark_text': an_wm_text,
+                        'watermark_pos': an_wm_pos,
+                    }
+                    st.success("Animation settings saved.")
+                    st.rerun()
+
+        # ---- Results -----------------------------------------------
+        with tabs[3]:
+            if 'history' not in st.session_state:
+                st.info("Run the simulation first.")
+            else:
+                history = st.session_state.history
+                solver = st.session_state.solver
+                idx = st.slider("Frame", 0, len(history) - 1,
+                                len(history) - 1, key="res_frame")
+                vis = EnhancedTwinVisualizer(Nx, Ny, dx, dy, dt=params['dt'])
+                style = {
+                    'colormaps': {},
+                    'field_settings': viz_cfg['field_settings'],
+                    'title_font_size': viz_cfg['title_font_size'],
+                    'label_font_size': viz_cfg['label_font_size'],
+                    'colorbar_fraction': viz_cfg['colorbar_fraction'],
+                    'colorbar_pad': viz_cfg['colorbar_pad'],
+                }
+
+                mode_res = st.radio(
+                    "Display mode",
+                    ["Multi-field grid", "Overlay", "Vector field"],
+                    horizontal=True, key="res_mode")
+
+                if mode_res == "Multi-field grid":
+                    fig = vis.create_multi_field_comparison(history[idx], style)
+                    if fig is not None:
+                        st.pyplot(fig); plt.close(fig)
+                elif mode_res == "Overlay":
+                    ov = viz_cfg['overlay']
+                    fig = vis.create_overlay(
+                        history[idx],
+                        base_field=ov['base'],
+                        overlay_field=ov['overlay'],
+                        alpha=ov['alpha'],
+                        mode=ov['mode'],
+                        n_contours=ov['n_contours'],
+                        show_grain_ghost=ov['show_grain_ghost'],
+                        grain_map=history[idx].get('grain_map'),
+                        style_params=style)
+                    if fig is not None:
+                        st.pyplot(fig); plt.close(fig)
+                    else:
+                        st.warning("Overlay failed — check field selections.")
+                else:
+                    vv = viz_cfg['vector']
+                    base_choice = ('sigma_h' if vv['mode'] == 'principal_stress'
+                                   else 'sigma_eq')
+                    fig = vis.create_vector_overlay(
+                        history[idx],
+                        source=vv['source'],
+                        mode=vv['mode'],
+                        density=vv['density'],
+                        color=vv['color'],
+                        scale=vv['scale'],
+                        base_field=base_choice,
+                        style_params=style)
+                    if fig is not None:
+                        st.pyplot(fig); plt.close(fig)
+                    else:
+                        st.warning("Vector field unavailable — need sxx/syy/sxy "
+                                    "and a valid source.")
+
+                st.subheader("Region-Averaged Diagnostics")
+                t = np.array(solver.history['time'])
+
+                fig, axes = plt.subplots(2, 2, figsize=(13, 8))
+                axes[0, 0].plot(t, solver.history['c_top'], 'b-', lw=2,
+                                label='Poly-Cu (top)')
+                axes[0, 0].plot(t, solver.history['c_bot'], 'r-', lw=2,
+                                label='nc-Cu (bottom)')
+                axes[0, 0].set_xlabel('t (ns)')
+                axes[0, 0].set_ylabel('mean c (Au)')
+                axes[0, 0].set_title('Au concentration: Poly-Cu vs nc-Cu')
+                axes[0, 0].legend(); axes[0, 0].grid(True, alpha=0.3)
+
+                axes[0, 1].plot(t, solver.history['gb_top'], 'b-', lw=2,
+                                label='Poly-Cu')
+                axes[0, 1].plot(t, solver.history['gb_bot'], 'r-', lw=2,
+                                label='nc-Cu')
+                axes[0, 1].set_xlabel('t (ns)')
+                axes[0, 1].set_ylabel('mean φ_gb')
+                axes[0, 1].set_title('GB density (Hart indicator)')
+                axes[0, 1].legend(); axes[0, 1].grid(True, alpha=0.3)
+
+                axes[1, 0].plot(t, np.array(solver.history['avg_stress'])/1e9,
+                                'g-', lw=2, label='Avg')
+                axes[1, 0].plot(t, np.array(solver.history['max_stress'])/1e9,
+                                'g--', lw=1.5, label='Max')
+                axes[1, 0].set_xlabel('t (ns)')
+                axes[1, 0].set_ylabel('σ (GPa)')
+                axes[1, 0].set_title('Stress evolution')
+                axes[1, 0].legend(); axes[1, 0].grid(True, alpha=0.3)
+
+                au_mass = np.array(solver.history['au_mass'])
+                axes[1, 1].plot(t, au_mass / max(au_mass[0], 1e-12), 'k-',
+                                lw=2, label='Au mass / initial')
+                c_top_arr = np.array(solver.history['c_top'])
+                c_bot_arr = np.array(solver.history['c_bot'])
+                ax2 = axes[1, 1].twinx()
+                ax2.plot(t, c_top_arr, 'b--', lw=1.5, label='c_top')
+                ax2.plot(t, c_bot_arr, 'r--', lw=1.5, label='c_bot')
+                ax2.set_ylabel('mean c')
+                axes[1, 1].set_xlabel('t (ns)')
+                axes[1, 1].set_ylabel('mass ratio')
+                axes[1, 1].set_title('Mass conservation (guarded)')
+                axes[1, 1].legend(loc='upper left')
+                ax2.legend(loc='upper right')
+                axes[1, 1].grid(True, alpha=0.3)
+
+                plt.tight_layout()
+                st.pyplot(fig); plt.close(fig)
+
+        # ---- Line profiles -----------------------------------------
+        with tabs[4]:
+            if 'history' not in st.session_state:
+                st.info("Run the simulation first.")
+            else:
+                history = st.session_state.history
+                profiler = EnhancedLineProfiler(Nx, Ny, dx, dy)
+
+                sub_a, sub_b = st.tabs(["Single frame", "Multi-time compare"])
+
+                with sub_a:
+                    idx = st.slider("Frame", 0, len(history) - 1,
+                                    len(history) - 1, key="lp_frame")
+                    res = history[idx]
+                    field = st.selectbox("Field",
+                                          list(FIELD_DEFAULT_CMAPS.keys()),
+                                          index=0, key="lp_field")
+                    ptype = st.selectbox("Profile direction",
+                                          ["horizontal", "vertical",
+                                           "diagonal", "anti_diagonal"],
+                                          key="lp_ptype")
+                    pos = st.slider("Position ratio", 0.0, 1.0, 0.5, 0.05,
+                                    key="lp_pos")
+
+                    d, unit = _rescale_field(field, res[field])
+                    out = profiler.extract_profile(d, ptype, pos)
+                    if out is FAILED or out is None:
+                        st.warning("Profile extraction failed.")
+                    else:
+                        dist, prof, _ = out
+                        if dist is not None:
+                            fig, ax = plt.subplots(figsize=(11, 4))
+                            ax.plot(dist, prof, 'b-', lw=2)
+                            ax.set_xlabel('Position (nm)')
+                            ax.set_ylabel(f'{field} {unit}')
+                            ax.set_title(f'{field} · {ptype} profile · frame {idx}')
+                            ax.grid(True, alpha=0.3)
+                            st.pyplot(fig); plt.close(fig)
+
+                with sub_b:
+                    field_mt = st.selectbox("Field",
+                                             list(FIELD_DEFAULT_CMAPS.keys()),
+                                             index=0, key="lp_mt_field")
+                    ptype_mt = st.selectbox("Profile direction",
+                                             ["horizontal", "vertical",
+                                              "diagonal", "anti_diagonal"],
+                                             key="lp_mt_ptype")
+                    pos_mt = st.slider("Position ratio", 0.0, 1.0, 0.5, 0.05,
+                                        key="lp_mt_pos")
+                    default_frames = list(range(0, len(history),
+                                                 max(1, len(history) // 6)))
+                    frames_sel = st.multiselect(
+                        "Frames",
+                        list(range(len(history))),
+                        default=default_frames)
+                    use_plotly_mt = st.checkbox("Use Plotly (interactive)",
+                                                 value=True, key="lp_mt_plotly")
+                    if frames_sel:
+                        vis_lp = EnhancedTwinVisualizer(Nx, Ny, dx, dy,
+                                                          dt=params['dt'])
+                        fig_mt = vis_lp.create_multi_time_profiles(
+                            history, field_mt, ptype_mt, frames_sel,
+                            position_ratio=pos_mt, use_plotly=use_plotly_mt)
+                        if fig_mt is None:
+                            st.warning("No profiles could be extracted.")
+                        elif use_plotly_mt:
+                            st.plotly_chart(fig_mt, use_container_width=True)
+                        else:
+                            st.pyplot(fig_mt); plt.close(fig_mt)
+
+        # ---- Plotly -------------------------------------------------
+        with tabs[5]:
+            if 'history' not in st.session_state:
+                st.info("Run the simulation first.")
+            else:
+                history = st.session_state.history
+                vis = EnhancedTwinVisualizer(Nx, Ny, dx, dy, dt=params['dt'])
+
+                view = st.radio("Plotly view",
+                                 ["Heatmap (frame)", "3D surface",
+                                  "Time-scrubbing animation",
+                                  "Line profiles"],
+                                 horizontal=True, key="px_view")
+
+                if view == "Heatmap (frame)":
+                    idx = st.slider("Frame", 0, len(history) - 1,
+                                    len(history) - 1, key="px_frame")
+                    field = st.selectbox("Field",
+                                          list(FIELD_DEFAULT_CMAPS.keys()),
+                                          index=0, key="px_field")
+                    cmap = FIELD_DEFAULT_CMAPS.get(field, 'viridis')
+                    fig_h = vis.create_plotly_heatmap(
+                        history[idx], field, idx, cmap, viz_cfg=viz_cfg)
+                    if fig_h is not None:
+                        st.plotly_chart(fig_h, use_container_width=True)
+
+                elif view == "3D surface":
+                    idx = st.slider("Frame", 0, len(history) - 1,
+                                    len(history) - 1, key="px_3d_frame")
+                    field = st.selectbox("Field",
+                                          list(FIELD_DEFAULT_CMAPS.keys()),
+                                          index=0, key="px_3d_field")
+                    show_c = st.checkbox("Show contours", value=True,
+                                          key="px_3d_cont")
+                    cmap = FIELD_DEFAULT_CMAPS.get(field, 'viridis')
+                    fig_3d = vis.create_plotly_3d_surface(
+                        history[idx], field, idx, cmap,
+                        show_contours=show_c, viz_cfg=viz_cfg)
+                    if fig_3d is not None:
+                        st.plotly_chart(fig_3d, use_container_width=True)
+
+                elif view == "Time-scrubbing animation":
+                    field = st.selectbox("Field",
+                                          list(FIELD_DEFAULT_CMAPS.keys()),
+                                          index=0, key="px_anim_field")
+                    cmap = FIELD_DEFAULT_CMAPS.get(field, 'viridis')
+                    with st.spinner("Building animation frames..."):
+                        fig_anim = vis.create_plotly_animation(
+                            history, field, params['dt'], cmap, viz_cfg=viz_cfg)
+                    if fig_anim is not None:
+                        st.plotly_chart(fig_anim, use_container_width=True)
+                    else:
+                        st.warning("Could not build animation.")
+
+                else:
+                    idx = st.slider("Frame", 0, len(history) - 1,
+                                    len(history) - 1, key="px_lp_frame")
+                    field = st.selectbox("Field",
+                                          list(FIELD_DEFAULT_CMAPS.keys()),
+                                          index=0, key="px_lp_field")
+                    ptypes = st.multiselect(
+                        "Directions",
+                        ["horizontal", "vertical", "diagonal", "anti_diagonal"],
+                        default=["horizontal", "vertical"], key="px_lp_types")
+                    pos = st.slider("Position ratio", 0.0, 1.0, 0.5, 0.05,
+                                    key="px_lp_pos")
+                    if ptypes:
+                        fig_lp = vis.create_plotly_line_profiles(
+                            history[idx], field, ptypes, pos, viz_cfg=viz_cfg)
+                        if fig_lp is not None:
+                            st.plotly_chart(fig_lp, use_container_width=True)
+
+        # ---- Export -------------------------------------------------
+        with tabs[6]:
+            if 'history' not in st.session_state:
+                st.info("Run the simulation first.")
+            else:
+                params = st.session_state.params
+                history = st.session_state.history
+                sim_data = {'metadata':
+                            {'created_at': datetime.now().isoformat()}}
+                name = (f"au_cu_bonding_Nx{params['Nx']}_Ny{params['Ny']}"
+                        f"_npoly{params['n_poly_grains']}_seed{params['seed']}")
+
+                st.subheader("📦 Data export")
+                col1, col2 = st.columns(2)
+                with col1:
+                    if st.button("Pickle"):
+                        buf, fname = DataExporter.export_pkl(
+                            sim_data, params, history, name)
+                        if buf:
+                            st.download_button("Download .pkl", buf, fname)
+                    if st.button("JSON"):
+                        buf, fname = DataExporter.export_json(
+                            sim_data, params, history, name)
+                        if buf:
+                            st.download_button("Download .json", buf, fname)
+                    if st.button("PyTorch (.pt)"):
+                        buf, fname = DataExporter.export_pt(
+                            sim_data, params, history, name)
+                        if buf:
+                            st.download_button("Download .pt", buf, fname)
+                with col2:
+                    if st.button("CSV (zip)"):
+                        extent = [-Nx*dx/2, Nx*dx/2, -Ny*dy/2, Ny*dy/2]
+                        buf, fname = DataExporter.export_csv(
+                            history, name, extent, Nx, Ny, dx, dy)
+                        if buf:
+                            st.download_button("Download .zip", buf, fname)
+                    if st.button("HDF5"):
+                        buf, fname = DataExporter.export_hdf5(
+                            sim_data, params, history, name, Nx, Ny, dx, dy)
+                        if buf:
+                            st.download_button("Download .h5", buf, fname)
+
+                st.markdown("---")
+                st.subheader("🎬 Animation export")
+                an = viz_cfg['animation']
+                anim_field = st.selectbox("Field",
+                                           list(FIELD_DEFAULT_CMAPS.keys()),
+                                           index=0, key="anim_field")
+                c1, c2, c3 = st.columns(3)
+                with c1:
+                    a_fmt = st.selectbox("Format", ['gif', 'mp4'],
+                                          index=0 if an['format'] == 'gif' else 1,
+                                          key="anim_fmt_ui")
+                with c2:
+                    a_fps = st.slider("FPS", 1, 30, int(an['fps']), 1,
+                                       key="anim_fps_ui")
+                with c3:
+                    a_dpi = st.slider("DPI", 72, 300, int(an['dpi']), 12,
+                                       key="anim_dpi_ui")
+                a_wm = st.checkbox("Watermark",
+                                    value=an['watermark'], key="anim_wm_ui")
+                a_wm_text = st.text_input("Watermark text",
+                                           value=an['watermark_text'],
+                                           key="anim_wm_text_ui")
+                wm_pos_list_ui = ['lower right', 'lower left', 'upper right', 'upper left']
+                wm_idx_ui = (wm_pos_list_ui.index(an['watermark_pos'])
+                             if an['watermark_pos'] in wm_pos_list_ui else 0)
+                a_wm_pos = st.selectbox("Watermark position",
+                                         wm_pos_list_ui,
+                                         index=wm_idx_ui,
+                                         key="anim_wm_pos_ui")
+
+                if st.button("🎬 Generate single-field animation"):
+                    cmap = FIELD_DEFAULT_CMAPS.get(anim_field, 'viridis')
+                    vis_exp = EnhancedTwinVisualizer(Nx, Ny, dx, dy,
+                                                      dt=params['dt'])
+                    buf = vis_exp.create_animation_buffer(
+                        history, anim_field, params['dt'],
+                        output_format=a_fmt, fps=a_fps, dpi=a_dpi,
+                        cmap_name=cmap, watermark=a_wm,
+                        watermark_text=a_wm_text,
+                        watermark_pos=a_wm_pos, viz_cfg=viz_cfg)
+                    if buf is not None:
+                        st.download_button(
+                            f"Download .{a_fmt}", buf,
+                            f"{name}_{anim_field}.{a_fmt}")
+                    else:
+                        st.error("Animation generation failed. For MP4, "
+                                  "ensure ffmpeg is installed.")
+
+                if st.button("📦 Batch generate ALL fields (zip of GIFs)"):
+                    vis_exp = EnhancedTwinVisualizer(Nx, Ny, dx, dy,
+                                                      dt=params['dt'])
+                    zip_buf = BytesIO()
+                    with zipfile.ZipFile(zip_buf, "w",
+                                          zipfile.ZIP_DEFLATED) as zf:
+                        prog = st.progress(0)
+                        fields_all = list(FIELD_DEFAULT_CMAPS.keys())
+                        for k, fname in enumerate(fields_all):
+                            cmap = FIELD_DEFAULT_CMAPS.get(fname, 'viridis')
+                            buf = vis_exp.create_animation_buffer(
+                                history, fname, params['dt'],
+                                output_format='gif', fps=a_fps, dpi=a_dpi,
+                                cmap_name=cmap, watermark=a_wm,
+                                watermark_text=a_wm_text,
+                                watermark_pos=a_wm_pos, viz_cfg=viz_cfg)
+                            if buf is not None:
+                                zf.writestr(f"{name}_{fname}.gif",
+                                            buf.getvalue())
+                            prog.progress((k + 1) / len(fields_all))
+                    zip_buf.seek(0)
+                    st.download_button("Download all GIFs (.zip)", zip_buf,
+                                        f"{name}_all_fields.zip")
+
+    # ==================================================================
+    elif mode == "Single Simulation View" and st.session_state.get('view_id'):
+        sid = st.session_state.view_id
+        sim = SimulationDatabase.get(sid)
+        if sim is None:
+            st.error("Simulation not found.")
+        else:
+            st.header(f"Simulation: {sid}")
+            params = sim['params']
+            history = sim['results_history']
+            Nx = params['Nx']; Ny = params['Ny']
+            dx = params['dx']; dy = params.get('dy', dx)
+
+            safe_params = {}
+            for k, v in params.items():
+                if isinstance(v, np.ndarray):
+                    continue
+                if isinstance(v, (np.integer, np.floating, np.bool_)):
+                    v = v.item()
+                safe_params[k] = v
+            st.json(safe_params)
+
+            if history:
+                idx = st.slider("Frame", 0, len(history) - 1,
+                                len(history) - 1,
+                                key=f"view_frame_{sid}")
+                vis = EnhancedTwinVisualizer(Nx, Ny, dx, dy,
+                                              dt=params['dt'])
+                style = {
+                    'colormaps': {},
+                    'field_settings': viz_cfg['field_settings'],
+                    'title_font_size': viz_cfg['title_font_size'],
+                    'label_font_size': viz_cfg['label_font_size'],
+                    'colorbar_fraction': viz_cfg['colorbar_fraction'],
+                    'colorbar_pad': viz_cfg['colorbar_pad'],
+                }
+                fig = vis.create_multi_field_comparison(history[idx], style)
+                if fig is not None:
+                    st.pyplot(fig); plt.close(fig)
+
+            if st.button("🗑️ Delete"):
+                SimulationDatabase.delete(sid)
+                if 'view_id' in st.session_state:
+                    del st.session_state.view_id
+                st.rerun()
+
+    # ==================================================================
+    elif mode == "Compare Saved" and st.session_state.get('compare_ids'):
+        ids = st.session_state.compare_ids
+        sims = [SimulationDatabase.get(i) for i in ids]
+        sims = [s for s in sims if s is not None]
+        if not sims:
+            st.warning("No valid simulations selected.")
+        else:
+            st.header(f"Comparing {len(sims)} simulations")
+            field = st.selectbox("Field",
+                                  list(FIELD_DEFAULT_CMAPS.keys()),
+                                  index=0, key="cmp_field")
+            fs_cmp = viz_cfg['field_settings'].get(field, {})
+            cmap_name = FIELD_DEFAULT_CMAPS.get(field, 'viridis')
+            cmap = ColormapRegistry.resolve(cmap_name,
+                                             invert=fs_cmp.get('invert', False))
+            cols = min(3, len(sims))
+            rows = (len(sims) + cols - 1) // cols
+            fig, axes = plt.subplots(rows, cols, figsize=(5 * cols, 4 * rows))
+            axes = np.array(axes).flatten()
+            all_vals = []
+            for sim in sims:
+                h = sim['results_history']
+                if h and field in h[-1]:
+                    dd, _ = _rescale_field(field, h[-1][field])
+                    finite = dd[np.isfinite(dd)]
+                    if finite.size:
+                        all_vals.append(finite)
+            if (all_vals and field not in ('phi', 'eta_poly', 'eta_au',
+                                            'eta_nc', 'phi_gb', 'grain_map')):
+                stack = np.concatenate(all_vals)
+                vmin_g = float(np.percentile(stack, 2))
+                vmax_g = float(np.percentile(stack, 98))
+                if field == 'sigma_h':
+                    zm = max(abs(vmin_g), abs(vmax_g))
+                    vmin_g, vmax_g = -zm, zm
+            elif field in ('phi', 'eta_poly', 'eta_au', 'eta_nc', 'phi_gb'):
+                vmin_g, vmax_g = 0.0, 1.0
+            else:
+                vmin_g, vmax_g = None, None
+
+            for i, sim in enumerate(sims):
+                p = sim['params']
+                h = sim['results_history']
+                if not h:
+                    continue
+                last = h[-1]
+                if field not in last:
+                    continue
+                d, unit = _rescale_field(field, last[field])
+                extent = [-p['Nx']*p['dx']/2, p['Nx']*p['dx']/2,
+                          -p['Ny']*p['dy']/2, p['Ny']*p['dy']/2]
+                ax = axes[i]
+                interp = 'nearest' if field in DISCRETE_FIELDS else 'bilinear'
+                im = ax.imshow(d, extent=extent, origin='lower', cmap=cmap,
+                               vmin=vmin_g, vmax=vmax_g,
+                               interpolation=interp, aspect='equal')
+                ax.set_title(f"{sim['id']} — {field}")
+                if field != 'grain_map':
+                    plt.colorbar(im, ax=ax, fraction=0.046)
+            for k in range(len(sims), len(axes)):
+                axes[k].axis('off')
+            plt.tight_layout()
+            st.pyplot(fig); plt.close(fig)
+
+
+if __name__ == "__main__":
+    main()
