@@ -2,10 +2,13 @@
 Au-assisted Cu-Cu diffusion bonding simulator — rectangular MPF edition
 =======================================================================
 FIXES in this revision:
-  • axhline() on 2D wavy interface arrays → replaced with ax.plot()
-  • Added _extract_interface_profile() helper (robust to multi-valued interfaces)
-  • Added layer-boundary overlay in initial-geometry Au-concentration plot
-  • All other physics, geometry, visualization preserved unchanged
+  • self.kappa_eta is now initialized BEFORE _relax_grains is called
+    (was causing AttributeError in the __init__ chain)
+  • Poly-Cu grain count restricted to 1 or 2 (user-selectable) — this
+    matches the physics of coarse grains d > 100 nm in a ~200 nm domain.
+    Voronoi with 1 seed gives one full-width grain; with 2 seeds gives a
+    single curved boundary between them.
+  • n_poly_grains passed explicitly through the build() API.
 """
 
 import numpy as np
@@ -55,11 +58,10 @@ def handle_errors(func):
 # RECTANGULAR SPECTRAL OPERATORS
 # ============================================================================
 def make_k_vectors(Nx, Ny, dx, dy=None):
-    """2D wavenumber grids for a rectangular (Ny, Nx) domain."""
     if dy is None:
         dy = dx
-    kx = 2 * np.pi * fftfreq(Nx, d=dx).reshape(1, -1)   # (1, Nx)
-    ky = 2 * np.pi * fftfreq(Ny, d=dy).reshape(-1, 1)   # (Ny, 1)
+    kx = 2 * np.pi * fftfreq(Nx, d=dx).reshape(1, -1)
+    ky = 2 * np.pi * fftfreq(Ny, d=dy).reshape(-1, 1)
     k2 = kx**2 + ky**2
     k2[0, 0] = 1e-12
     return kx, ky, k2
@@ -80,39 +82,22 @@ def spectral_divergence(fx, fy, kx, ky):
 
 
 # ============================================================================
-# INTERFACE PROFILING HELPERS (fix for wavy 2D interface arrays)
+# INTERFACE PROFILING HELPERS
 # ============================================================================
 def _extract_interface_profile(interface_2d):
-    """
-    Extract a representative 1D profile from a 2D interface-level field.
-
-    The interface field y_*(x, y) is a scalar level-set of the layer boundary.
-    For a boundary that only varies along x (which is our case: the wave was
-    built from np.sin(2π x / λ) broadcast across y), every row is identical,
-    so we simply return row 0.
-
-    If the interface has genuine y-variation (advanced geometry), we return
-    the column-wise mean so we still get a sensible 1D curve.
-    """
+    """Return a 1D representative profile from a possibly 2D interface array."""
     a = np.asarray(interface_2d)
     if a.ndim == 0:
         return None
     if a.ndim == 1:
         return a
-    # Same row everywhere? then just take row 0
     if a.shape[0] > 1 and np.allclose(a[0, :], a[-1, :], atol=1e-9):
         return a[0, :]
-    # Otherwise average over rows — graceful fallback
     return np.mean(a, axis=0)
 
 
 def _plot_interface(ax, x_coords, interface_2d, **line_kwargs):
-    """
-    Plot a (possibly wavy) layer interface on an imshow axes.
-
-    If the interface is scalar (legacy case), use axhline.
-    If it is 1D/2D, use ax.plot with the extracted profile.
-    """
+    """Plot a possibly wavy layer interface (axhline if scalar, ax.plot otherwise)."""
     a = np.asarray(interface_2d)
     if a.ndim == 0 or (a.ndim == 1 and a.size == 1):
         ax.axhline(float(a), **line_kwargs)
@@ -243,7 +228,6 @@ FIELD_UNITS = {
     'eps_p_mag': '', 'sigma_y': 'MPa', 'rho_gnd': '',
 }
 
-# Discrete fields get "nearest" interpolation (no bilinear blur)
 DISCRETE_FIELDS = {'grain_map', 'phi_gb'}
 
 
@@ -289,7 +273,7 @@ def voronoi_assign(Nx, Ny, extent, seeds, mask=None, warp=None):
     """Assign each pixel to nearest seed. warp=(sx, sy) optional distortion field."""
     x = np.linspace(extent[0], extent[1], Nx)
     y = np.linspace(extent[2], extent[3], Ny)
-    X, Y = np.meshgrid(x, y)             # (Ny, Nx)
+    X, Y = np.meshgrid(x, y)
     pts = np.column_stack([X.ravel(), Y.ravel()])
     if len(seeds) == 0:
         return np.full((Ny, Nx), -1, dtype=int)
@@ -300,7 +284,7 @@ def voronoi_assign(Nx, Ny, extent, seeds, mask=None, warp=None):
         ix = np.clip(((pts[:, 0] - extent[0]) / (extent[1] - extent[0]) *
                       (wx.shape[1] - 1)).astype(int), 0, wx.shape[1] - 1)
         iy = np.clip(((pts[:, 1] - extent[2]) / (extent[3] - extent[2]) *
-                      (wx.shape[0] - 1)).astype(int), 0, wx.shape[0] - 1)
+                      (wx.shape[0] - 1)).astype(int), 0, wy.shape[0] - 1)
         pts_w[:, 0] += wx[iy, ix]
         pts_w[:, 1] += wy[iy, ix]
         tree = cKDTree(seeds + np.column_stack([
@@ -345,9 +329,9 @@ def make_warp_field(Nx, Ny, extent, amplitude, wavelength_nm, seed=0):
 class AuCuBondingGeometry:
     """
     Rectangular 3-layer domain:
-       Top    : Poly-Cu   (coarse Voronoi, curved via warp+relaxation)
+       Top    : Poly-Cu   (1 or 2 coarse grains — matches d > 100 nm physics)
        Middle : Au film   (single phase)
-       Bottom : nc-Cu     (fine Voronoi, sharp)
+       Bottom : nc-Cu     (many fine Voronoi grains, d < 100 nm)
     """
 
     def __init__(self, Nx, Ny, dx, dy=None):
@@ -364,6 +348,7 @@ class AuCuBondingGeometry:
     def build(self,
               poly_thickness_frac=0.45,
               au_thickness_frac=0.04,
+              n_poly_grains=2,
               poly_grain_size_nm=150.0,
               nc_grain_size_nm=15.0,
               gb_width_nm=1.5,
@@ -377,32 +362,61 @@ class AuCuBondingGeometry:
         y_poly_bot = y_top - total_h * poly_thickness_frac
         y_au_bot   = y_poly_bot - total_h * au_thickness_frac
 
-        # Wavy layer interfaces (2D arrays — the source of the axhline issue)
+        # Wavy interfaces
         interface_wave_amp = 1.5
         wave = interface_wave_amp * np.sin(2 * np.pi * self.X / 60.0)
-        y_poly_bot_eff = y_poly_bot + wave        # shape (Ny, Nx)
-        y_au_bot_eff   = y_au_bot   + 0.5 * wave  # shape (Ny, Nx)
+        y_poly_bot_eff = y_poly_bot + wave
+        y_au_bot_eff   = y_au_bot   + 0.5 * wave
 
         mask_poly = self.Y > y_poly_bot_eff
         mask_au   = (self.Y <= y_poly_bot_eff) & (self.Y > y_au_bot_eff)
         mask_nc   = self.Y <= y_au_bot_eff
 
-        # Seed counts
+        # ---------- poly grain count: explicit if given, else auto ----------
         Lx = self.extent[1] - self.extent[0]
-        area_poly = Lx * (y_top - y_poly_bot)
-        area_nc   = Lx * (y_au_bot - y_bot)
-        n_poly = max(2, int(round(area_poly / (poly_grain_size_nm ** 2))))
-        n_nc   = max(6, int(round(area_nc   / (nc_grain_size_nm   ** 2))))
+        if n_poly_grains is not None and n_poly_grains >= 1:
+            n_poly = int(n_poly_grains)
+        else:
+            area_poly = Lx * (y_top - y_poly_bot)
+            n_poly = max(1, int(round(area_poly / (poly_grain_size_nm ** 2))))
+        # Clamp to physical range for a 200 nm domain
+        n_poly = max(1, min(n_poly, 2))
 
-        def sample_seeds(mask, n):
+        area_nc = Lx * (y_au_bot - y_bot)
+        n_nc = max(6, int(round(area_nc / (nc_grain_size_nm ** 2))))
+
+        def sample_seeds_uniform(mask, n):
             ys, xs = np.where(mask)
             if len(ys) == 0: return np.zeros((0, 2))
             picks = rng.choice(len(ys), size=min(n, len(ys)), replace=False)
             return np.column_stack([self.X[ys[picks], xs[picks]],
                                      self.Y[ys[picks], xs[picks]]])
 
-        poly_seeds = sample_seeds(mask_poly, n_poly)
-        nc_seeds   = sample_seeds(mask_nc,   n_nc)
+        def sample_seeds_manual(mask, xs_list, ys_list):
+            """Place seeds at user-given fractional (x, y) positions inside mask."""
+            pts = []
+            for fx, fy in zip(xs_list, ys_list):
+                x_val = self.extent[0] + fx * Lx
+                y_lo = y_poly_bot
+                y_hi = y_top
+                y_val = y_lo + fy * (y_hi - y_lo)
+                pts.append([x_val, y_val])
+            return np.array(pts) if pts else np.zeros((0, 2))
+
+        if n_poly == 1:
+            # Single grain spanning the whole top layer — one seed at its centre
+            poly_seeds = sample_seeds_manual(mask_poly, [0.5], [0.5])
+        elif n_poly == 2:
+            # Two seeds, split roughly left/right but with a random y offset
+            x1 = 0.30 + 0.05 * (rng.random() - 0.5)
+            x2 = 0.70 + 0.05 * (rng.random() - 0.5)
+            y1 = 0.35 + 0.30 * rng.random()
+            y2 = 0.35 + 0.30 * rng.random()
+            poly_seeds = sample_seeds_manual(mask_poly, [x1, x2], [y1, y2])
+        else:
+            poly_seeds = sample_seeds_uniform(mask_poly, n_poly)
+
+        nc_seeds = sample_seeds_uniform(mask_nc, n_nc)
 
         # Wavy warp for the poly layer (makes Voronoi edges curved)
         wx, wy = make_warp_field(Nx, Ny, self.extent,
@@ -415,7 +429,6 @@ class AuCuBondingGeometry:
         gm_nc   = voronoi_assign(Nx, Ny, self.extent, nc_seeds,   mask_nc,
                                   warp=None)
 
-        # Global grain IDs
         grain_map = np.full((Ny, Nx), -1, dtype=int)
         n_poly_actual = len(poly_seeds)
         n_nc_actual   = len(nc_seeds)
@@ -427,7 +440,7 @@ class AuCuBondingGeometry:
         grain_map[mask_au] = au_idx
         n_total = n_poly_actual + 1 + n_nc_actual
 
-        # Diffuse fields (different widths per layer)
+        # Diffuse fields: coarse grains get wider GBs
         sigma_poly = max(4.0 * gb_width_nm / self.dx, 1.5)
         sigma_au   = max(1.0 * gb_width_nm / self.dx, 0.8)
         sigma_nc   = max(0.8 * gb_width_nm / self.dx, 0.6)
@@ -467,12 +480,10 @@ class AuCuBondingGeometry:
 
 
 # ============================================================================
-# 2D PLANE-STRAIN SPECTRAL ELASTICITY (correct Green's function)
+# 2D PLANE-STRAIN SPECTRAL ELASTICITY
 # ============================================================================
 class SpectralElasticSolver:
-    """
-    Solve ∇·σ = 0 for σ = C:(ε_total - ε*) via plane-strain Fourier Green's fn.
-    """
+    """Solve ∇·σ = 0 for σ = C:(ε_total - ε*) via plane-strain Fourier Green's fn."""
 
     def __init__(self, Nx, Ny, dx, dy, elastic_params, kx=None, ky=None, k2=None):
         self.Nx, self.Ny = Nx, Ny
@@ -535,7 +546,7 @@ class SpectralElasticSolver:
 
 
 # ============================================================================
-# MAIN MPF SOLVER (rectangular, Fickian + drift, anisotropic, solute drag)
+# MAIN MPF SOLVER
 # ============================================================================
 class AuCuBondingSolver:
     """Fully coupled MPF + Fickian/Hart + Elastoplastic solver."""
@@ -552,19 +563,27 @@ class AuCuBondingSolver:
         self.kx, self.ky, self.k2 = make_k_vectors(self.Nx, self.Ny,
                                                    self.dx, self.dy)
 
+        # ---- FIX: initialize kappa_eta and related scalars BEFORE any use ----
+        self.kappa_eta       = params.get('kappa_eta', 1.0)
+        self.aniso_strength  = params.get('aniso_strength', 0.3)
+        self.L_ref           = params.get('L_ref', 1.0)
+
+        # ---- Geometry (uses kappa_eta only via _relax_grains, called below) ----
         self.geom = AuCuBondingGeometry(self.Nx, self.Ny, self.dx, self.dy)
         (self.c, self.eta_list, self.grain_map,
          self.layer_id, self.geom_meta) = self.geom.build(
             poly_thickness_frac=params.get('poly_thickness_frac', 0.45),
             au_thickness_frac=params.get('au_thickness_frac', 0.04),
+            n_poly_grains=params.get('n_poly_grains', 2),
             poly_grain_size_nm=params.get('poly_grain_size_nm', 150.0),
             nc_grain_size_nm=params.get('nc_grain_size_nm', 15.0),
             gb_width_nm=params.get('gb_width_nm', 1.5),
             poly_curve_amp=params.get('poly_curve_amp', 8.0),
             seed=params.get('seed', 1234))
 
+        # Now kappa_eta is guaranteed to exist when _relax_grains reads it
         self.eta_list = self._relax_grains(self.eta_list,
-                                           n_steps=params.get('relax_steps', 40))
+                                            n_steps=params.get('relax_steps', 40))
 
         self.n_grains = len(self.eta_list)
         self.au_idx   = self.geom_meta['au_idx']
@@ -580,10 +599,6 @@ class AuCuBondingSolver:
         self.elastic = SpectralElasticSolver(
             self.Nx, self.Ny, self.dx, self.dy, self.mat['elastic'],
             self.kx, self.ky, self.k2)
-
-        self.kappa_eta = params.get('kappa_eta', 1.0)
-        self.aniso_strength = params.get('aniso_strength', 0.3)
-        self.L_ref = params.get('L_ref', 1.0)
 
         self.history = {
             'time': [], 'c_top': [], 'c_bot': [],
@@ -1197,9 +1212,9 @@ class SimulationDatabase:
             p = sim.get('params', {})
             out.append({
                 'id': sid,
-                'name': (f"Au-Cu | nc={p.get('nc_grain_size_nm',0):.0f}nm | "
+                'name': (f"Au-Cu | n_poly={p.get('n_poly_grains', '?')} | "
+                         f"nc={p.get('nc_grain_size_nm',0):.0f}nm | "
                          f"σ={p.get('applied_stress',0)/1e6:.0f}MPa | "
-                         f"β={p.get('misfit_beta',0):.3f} | "
                          f"D_gb={p.get('D_gb',0):.1f}"),
                 'params': p,
             })
@@ -1275,14 +1290,11 @@ def main():
     st.markdown("""
     <div style="background-color:#FFF8E7; padding:1rem; border-radius:8px;
                 border-left:5px solid #C9A227;">
-    <b>Fixes applied:</b><br>
-    ✅ Rectangular domain (Nx × Ny, independent dx/dy — default 205×102 nm)<br>
-    ✅ Fickian diffusion + stress drift (replaced phase-separating CH double-well)<br>
-    ✅ Individual nc-Cu grains via categorical <code>grain_map</code> colormap<br>
-    ✅ Anisotropic gradient energy κ(θ) and correct plane-strain Green's function<br>
-    ✅ Curved Poly-Cu boundaries via Allen-Cahn relaxation of Voronoi map<br>
-    ✅ KAM-like dislocation density ρ_GND and solute drag on GB mobility<br>
-    ✅ Wavy layer interfaces drawn with <code>ax.plot</code> (axhline fix)
+    <b>Physics:</b> MPF + Fickian/Hart + Solute Drag + Elastoplasticity.<br>
+    • Top <b>Poly-Cu</b>: <b>1 or 2</b> coarse grains (d &gt; 100 nm) — no GB network → D ≈ D_lat.<br>
+    • Middle <b>Au film</b>: pure source, 100 % concentration.<br>
+    • Bottom <b>nc-Cu</b>: many fine grains — dense GB network → D ≈ D_gb.<br>
+    • 30 MPa downward → ∇σ_h drives Au <b>selectively into nc-Cu</b>.
     </div>
     """, unsafe_allow_html=True)
 
@@ -1296,12 +1308,26 @@ def main():
 
         if mode == "Run New Simulation":
             st.subheader("🧱 Geometry")
+
+            # --- Poly-Cu is coarse (d > 100 nm): only 1 or 2 grains fit ---
+            n_poly_grains = st.radio(
+                "Number of Poly-Cu grains (top layer)",
+                options=[1, 2],
+                index=1,
+                horizontal=True,
+                help="Coarse grains have d > 100 nm, so only 1 or 2 fit "
+                     "across a ~200 nm wide domain. Use 2 to get a curved "
+                     "grain boundary running through the top layer.")
+            st.caption("Poly-Cu is coarse (d > 100 nm) → 1 or 2 grains.")
+
             poly_frac = st.slider("Poly-Cu thickness fraction", 0.10, 0.60, 0.45, 0.05)
             au_frac   = st.slider("Au film thickness fraction", 0.01, 0.15, 0.04, 0.005)
-            poly_gs   = st.slider("Poly-Cu grain size (nm)", 60.0, 500.0, 150.0, 10.0)
             nc_gs     = st.slider("nc-Cu grain size (nm)", 5.0, 60.0, 15.0, 1.0)
             gb_w      = st.slider("GB width (nm)", 0.5, 5.0, 1.5, 0.1)
-            curve_amp = st.slider("Poly-Cu boundary waviness (nm)", 0.0, 20.0, 8.0, 1.0)
+            curve_amp = st.slider("Poly-Cu boundary waviness (nm)",
+                                   0.0, 20.0, 8.0, 1.0,
+                                   help="Displaces the Voronoi edges to make "
+                                        "them look like real curved GBs.")
             relax_st  = st.slider("Curvature relaxation steps", 0, 200, 40, 10)
             seed_in   = st.number_input("Random seed", value=1234, step=1)
 
@@ -1354,7 +1380,8 @@ def main():
                     'Nx': Nx, 'Ny': Ny, 'dx': dx, 'dy': dy, 'dt': dt,
                     'poly_thickness_frac': poly_frac,
                     'au_thickness_frac':   au_frac,
-                    'poly_grain_size_nm':  poly_gs,
+                    'n_poly_grains':       int(n_poly_grains),
+                    'poly_grain_size_nm':  200.0,   # informational only
                     'nc_grain_size_nm':    nc_gs,
                     'gb_width_nm':         gb_w,
                     'poly_curve_amp':      curve_amp,
@@ -1383,7 +1410,8 @@ def main():
                     c, eta_list, gm, lid, meta = geom.build(
                         poly_thickness_frac=poly_frac,
                         au_thickness_frac=au_frac,
-                        poly_grain_size_nm=poly_gs,
+                        n_poly_grains=int(n_poly_grains),
+                        poly_grain_size_nm=200.0,
                         nc_grain_size_nm=nc_gs,
                         gb_width_nm=gb_w,
                         poly_curve_amp=curve_amp,
@@ -1393,8 +1421,8 @@ def main():
                     st.session_state.eta0 = eta_list
                     st.session_state.gm0 = gm
                     st.session_state.meta0 = meta
-                    st.success(f"✅ Initialized: {meta['n_poly']} Poly + 1 Au "
-                               f"+ {meta['n_nc']} nc = {meta['n_total']} phases")
+                    st.success(f"✅ Initialized: {meta['n_poly']} Poly grain(s) "
+                               f"+ 1 Au + {meta['n_nc']} nc = {meta['n_total']} phases")
 
         elif mode == "Single Simulation View":
             sims = SimulationDatabase.list_for_ui()
@@ -1431,7 +1459,7 @@ def main():
         # ---- Geometry ----------------------------------------------
         with tabs[0]:
             st.header("Initial 3-Layer Geometry (Rectangular)")
-            st.caption(f"Poly-Cu: {meta['n_poly']} coarse grains · "
+            st.caption(f"Poly-Cu: {meta['n_poly']} coarse grain(s) · "
                        f"Au: 1 phase · nc-Cu: {meta['n_nc']} fine grains · "
                        f"Total = {meta['n_total']} phases")
             st.caption(f"Domain: {Nx*dx:.1f} nm × {Ny*dy:.1f} nm  |  "
@@ -1441,13 +1469,11 @@ def main():
             x_coords = np.linspace(extent[0], extent[1], Nx)
             gm = st.session_state.gm0
 
-            # ---- Grain map with wavy interface overlay (FIXED) ------
             fig, ax = plt.subplots(figsize=(10, 4.5))
             cmap = ColormapRegistry.resolve('grain_map')
             im = ax.imshow(gm, extent=extent, origin='lower', cmap=cmap,
                            interpolation='nearest', aspect='equal')
 
-            # FIX: The interfaces are 2D wavy arrays — plot them, don't axhline them.
             _plot_interface(ax, x_coords, meta['y_poly_bot_eff'],
                             color='white', lw=1.5, ls='--',
                             label='Poly-Cu / Au interface')
@@ -1455,44 +1481,41 @@ def main():
                             color='yellow', lw=2.0,
                             label='Au / nc-Cu interface')
 
-            ax.set_title("Voronoi grain map  "
-                         "(white dashed = Poly/Au, yellow = Au/nc)")
+            ax.set_title(f"Voronoi grain map — Poly-Cu: {meta['n_poly']} grain(s), "
+                         f"nc-Cu: {meta['n_nc']} grains")
             ax.set_xlabel('x (nm)'); ax.set_ylabel('y (nm)')
             ax.legend(loc='upper right', framealpha=0.85)
             st.pyplot(fig); plt.close(fig)
 
-            # ---- Au concentration with the same interface overlay --
             c0 = st.session_state.c0
             fig, ax = plt.subplots(figsize=(10, 4.5))
             cmap_c = ColormapRegistry.resolve(st.session_state.global_cmaps['phi'])
             im = ax.imshow(c0, extent=extent, origin='lower', cmap=cmap_c,
                            vmin=0, vmax=1, aspect='equal')
-
             _plot_interface(ax, x_coords, meta['y_poly_bot_eff'],
                             color='white', lw=1.5, ls='--')
             _plot_interface(ax, x_coords, meta['y_au_bot_eff'],
                             color='yellow', lw=2.0)
-
             plt.colorbar(im, ax=ax, label='c (Au)')
             ax.set_title(f"Initial Au concentration · film thickness ≈ "
                          f"{meta['y_poly_bot']-meta['y_au_bot']:.1f} nm")
             ax.set_xlabel('x (nm)'); ax.set_ylabel('y (nm)')
             st.pyplot(fig); plt.close(fig)
 
-            # ---- Individual Poly-Cu η fields -----------------------
-            with st.expander("Individual Poly-Cu η fields (check curvature)",
+            with st.expander("Individual Poly-Cu η fields",
                              expanded=False):
                 eta0 = st.session_state.eta0
-                n_show = min(4, meta['n_poly'])
+                n_show = min(2, meta['n_poly'])
                 if n_show > 0:
-                    fig, axes = plt.subplots(1, n_show, figsize=(4*n_show, 4))
+                    fig, axes = plt.subplots(1, n_show, figsize=(5*n_show, 4.5))
                     axes = np.atleast_1d(axes)
                     for i in range(n_show):
                         axes[i].imshow(eta0[i], extent=extent, origin='lower',
                                        cmap='Blues', vmin=0, vmax=1,
                                        aspect='equal')
-                        axes[i].set_title(f"η_{i}")
+                        axes[i].set_title(f"η_{i} (Poly grain {i+1})")
                         axes[i].set_xlabel('x (nm)')
+                        axes[i].set_ylabel('y (nm)')
                     plt.tight_layout()
                     st.pyplot(fig); plt.close(fig)
 
@@ -1509,6 +1532,7 @@ def main():
                   `{params['applied_stress_angle']:.0f}°`
                 - Au-Cu misfit β = `{params['misfit_beta']:.3f}`
                 - Solute drag α = `{params['alpha_drag']:.0f}`
+                - Poly-Cu grains = `{params['n_poly_grains']}`
                 - Steps × dt = `{params['n_steps']} × {params['dt']:.4f} ns`
                   = `{params['n_steps']*params['dt']:.3f} ns` total
                 """)
@@ -1675,7 +1699,7 @@ def main():
                 history = st.session_state.history
                 sim_data = {'metadata': {'created_at': datetime.now().isoformat()}}
                 name = (f"au_cu_bonding_Nx{params['Nx']}_Ny{params['Ny']}"
-                        f"_seed{params['seed']}")
+                        f"_npoly{params['n_poly_grains']}_seed{params['seed']}")
                 col1, col2 = st.columns(2)
                 with col1:
                     if st.button("Pickle"):
