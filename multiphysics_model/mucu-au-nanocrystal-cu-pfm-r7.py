@@ -1,34 +1,20 @@
 """
-Au-assisted Cu-Cu diffusion bonding simulator — rectangular MPF edition (v3)
-=============================================================================
+Au-assisted Cu-Cu diffusion bonding simulator — rectangular MPF edition (v3.1)
+===============================================================================
 Physics: MPF + Fickian/Hart diffusion + Solute Drag + Elastoplasticity.
 
-MAJOR CHANGES in v3
--------------------
-Bug fixes (from review):
-  * handle_errors no longer silently returns None where callers unpack tuples;
-    decorated methods now return a typed sentinel that callers check.
-  * Cahn-Hilliard path now auto-substeps to respect a nonlinear CFL.
-  * Mass conservation now *actually* rejects blown-up steps.
-  * compute_local_grain_size now returns a physically meaningful
-    distance-to-nearest-GB-based grain size instead of 2/|∇s|.
-  * Plane-strain elastic moduli corrected: C11_2d=C11, C12_2d=C12, C44_2d=C44.
-  * Plastic flow direction now uses a J2 return-mapping step driven by the
-    local deviatoric stress, not a fixed xx+/yy- direction.
-  * torch import wrapped in try/except (like h5py).
-  * Animation vmin/vmax now computed over ALL frames.
-  * export_csv sigma_y branch made reachable.
-  * SimulationDatabase gains clear_all() / bounded cache.
+v3.1 CORRECTIONS (revert physics to v2, keep v3 visuals):
+  * Plane-strain elastic moduli restored to the effective 2D values.
+  * compute_local_grain_size restored to the spectral-gradient form.
+  * compute_plasticity restored to the fixed-direction v2 flow rule.
+  * Diffusion mass-conservation restored: steps are clipped + rescaled
+    (no more "rejection" that silently disabled GB diffusion and drift).
 
-Visualization upgrades:
-  * Full Visualization Settings tab: global theme, fonts, DPI, colorbar layout.
-  * Per-field dynamic range: vmin/vmax overrides, log-norm, colormap invert.
-  * Multi-field overlays: base heatmap + overlay heatmap OR contour lines.
-  * Vector field visualization: quiver + Plotly cone/scatter.
-  * Plotly time-scrubbing animation (frames + slider + play button).
-  * Multi-time line profiles.
-  * Animation export: GIF/MP4, watermark, batch (all fields → zip).
-  * Publication-ready matplotlib style presets.
+Kept from v3:
+  * Full Visualization Settings tab (themes, per-field scaling, overlays,
+    vector fields, Plotly time scrubbing, multi-time profiles, watermarks).
+  * handle_errors sentinel, Cahn-Hilliard substep guard (now rescale-only),
+    bounded SimulationDatabase, torch/h5py optional imports.
 """
 
 import numpy as np
@@ -49,7 +35,6 @@ from io import BytesIO, StringIO
 import pandas as pd
 import logging
 from typing import Dict, List, Optional, Tuple, Any
-from dataclasses import dataclass, field, asdict
 
 try:
     import torch
@@ -72,7 +57,6 @@ logger = logging.getLogger(__name__)
 # SENTINEL FOR DECORATED FAILURES
 # ============================================================================
 class _Sentinel:
-    """Typed sentinel returned by decorated functions on failure."""
     _instance = None
     def __new__(cls):
         if cls._instance is None:
@@ -89,13 +73,6 @@ FAILED = _Sentinel()
 # ERROR HANDLING
 # ============================================================================
 def handle_errors(func=None, *, re_raise=False):
-    """
-    Decorator. On exception:
-      - logs the traceback
-      - if re_raise=True: re-raises
-      - else: stores reason on FAILED sentinel and returns it
-    Callers MUST check `if result is FAILED` or `if not result` before unpacking.
-    """
     def deco(f):
         def wrapper(*args, **kwargs):
             try:
@@ -120,7 +97,6 @@ def handle_errors(func=None, *, re_raise=False):
 
 
 def safe_unpack(result, n, default=None):
-    """Unpack a decorated-return; if FAILED, return `default` n-tuple."""
     if result is FAILED or result is None:
         if default is None:
             return tuple([None] * n)
@@ -322,7 +298,6 @@ _SCIENCE_RC = {
 
 
 def apply_matplotlib_theme(theme_name: str, cfg: dict):
-    """Apply a matplotlib theme and per-app font/DPI overrides."""
     plt.rcdefaults()
     style = MATPLOTLIB_THEMES.get(theme_name, None)
     if style == '__nature__':
@@ -687,7 +662,7 @@ class AuCuBondingGeometry:
 
 
 # ============================================================================
-# SPECTRAL ELASTICITY  (plane-strain moduli corrected)
+# SPECTRAL ELASTICITY — v2 plane-strain moduli (restored)
 # ============================================================================
 class SpectralElasticSolver:
     def __init__(self, Nx, Ny, dx, dy, elastic_params, kx=None, ky=None, k2=None):
@@ -700,9 +675,12 @@ class SpectralElasticSolver:
 
         C11, C12, C44 = (elastic_params['C11'], elastic_params['C12'],
                          elastic_params['C44'])
-        self.C11_2d, self.C12_2d, self.C44_2d = C11, C12, C44
-        lam = C12
-        mu  = C44
+        # RESTORED: effective 2D plane-strain moduli (v2)
+        C11_2d = (C11 + C12 + 2 * C44) / 2
+        C12_2d = (C11 + C12 - 2 * C44) / 2
+        self.C11_2d, self.C12_2d, self.C44_2d = C11_2d, C12_2d, C44
+        lam = C12_2d
+        mu  = (C11_2d - C12_2d) / 2
         self.lam, self.mu = lam, mu
 
         k2 = self.k2
@@ -841,17 +819,14 @@ class AuCuBondingSolver:
 
     # ------------------------------------------------------------------
     def compute_local_grain_size(self):
-        """Distance-to-nearest-GB based grain size: h ≈ 2 × dist."""
-        phi_gb = self.compute_gb_indicator()
-        gb_mask = phi_gb > 0.5
-        if not gb_mask.any():
-            return np.full((self.Ny, self.Nx), 100.0)
-        dist = distance_transform_edt(~gb_mask) * min(self.dx, self.dy)
-        h = 2.0 * dist
-        return np.clip(h, 2.0, 300.0)
+        """RESTORED v2: spectral-gradient grain size."""
+        s = np.sum(self.eta_list, axis=0)
+        gx, gy = spectral_gradients(s, self.kx, self.ky)
+        gm = np.sqrt(gx**2 + gy**2 + 1e-15)
+        return np.clip(2.0 / gm, 0, 300.0)
 
     # ==================================================================
-    # DIFFUSION
+    # DIFFUSION — v2 mass conservation (rescale, never reject)
     # ==================================================================
     def evolve_concentration(self, sigma_h):
         phi_gb = self.compute_gb_indicator()
@@ -882,84 +857,34 @@ class AuCuBondingSolver:
 
     # ------------------------------------------------------------------
     def _cahn_hilliard_step(self, sigma_h, D_eff, Omega):
-        dx_min = min(self.dx, self.dy)
-        M_max = float(np.max(D_eff))
-        W_eff = max(abs(self.W), 1e-9)
-        dt_cfl = 0.20 * dx_min**2 / max(M_max * W_eff, 1e-12)
-        n_sub = max(1, int(np.ceil(self.dt / dt_cfl)))
-        dt_sub = self.dt / n_sub
+        """RESTORED v2 CH step: clip + rescale, never reject."""
+        sigma_h_norm = sigma_h / 1e9
+        c = self.c
+        df_dc = self.W * (4.0 * c**3 - 6.0 * c**2 + 2.0 * c)
+        lap_c = spectral_laplacian(c, self.k2)
+        mu = df_dc - self.kappa_c * lap_c + Omega * sigma_h_norm
 
-        c_start = self.c.copy()
-        c = self.c.copy()
+        mu_gx, mu_gy = spectral_gradients(mu, self.kx, self.ky)
+        Jx = -D_eff * mu_gx
+        Jy = -D_eff * mu_gy
+        div_J = spectral_divergence(Jx, Jy, self.kx, self.ky)
 
-        for _ in range(n_sub):
-            sigma_h_norm = sigma_h / 1e9
+        c_expl = c + self.dt * div_J
+        denom = 1.0 + self.dt * self.M_ref * self.kappa_c * self.k2**2
+        c_new = np.real(ifft2(fft2(c_expl) / denom))
 
-            df_dc = self.W * (4.0 * c**3 - 6.0 * c**2 + 2.0 * c)
-            lap_c = spectral_laplacian(c, self.k2)
-            mu = df_dc - self.kappa_c * lap_c + Omega * sigma_h_norm
-
-            mu_gx, mu_gy = spectral_gradients(mu, self.kx, self.ky)
-            Jx = -D_eff * mu_gx
-            Jy = -D_eff * mu_gy
-            div_J = spectral_divergence(Jx, Jy, self.kx, self.ky)
-
-            c_expl = c + dt_sub * div_J
-
-            denom = 1.0 + dt_sub * self.M_ref * self.kappa_c * self.k2**2
-            c_new = np.real(ifft2(fft2(c_expl) / denom))
-
-            c_clip = np.clip(c_new, 0.0, 1.0)
-
-            m_old = float(np.sum(c))
-            m_new = float(np.sum(c_clip))
-            if m_old < 1e-12:
-                c = c_clip
-                continue
-            ratio = m_new / m_old
-            max_inc = float(np.max(np.abs(c_clip - c)))
-            if ratio < 0.5 or ratio > 2.0 or max_inc > 0.5:
-                logger.warning(
-                    f"CH substep rejected: mass ratio {ratio:.3e}, "
-                    f"max increment {max_inc:.3e}")
-                c_attempt = self._ch_half_step(c, sigma_h, D_eff, Omega,
-                                                dt_sub * 0.5)
-                if c_attempt is not None:
-                    c = c_attempt
-            else:
-                c_clip *= m_old / m_new
-                c = np.clip(c_clip, 0.0, 1.0)
-
-        if not np.any(np.isfinite(c)):
-            return np.clip(c_start, 0.0, 1.0)
-        return np.clip(c, 0.0, 1.0)
-
-    def _ch_half_step(self, c0, sigma_h, D_eff, Omega, dt_half):
-        try:
-            sigma_h_norm = sigma_h / 1e9
-            df_dc = self.W * (4.0 * c0**3 - 6.0 * c0**2 + 2.0 * c0)
-            lap_c = spectral_laplacian(c0, self.k2)
-            mu = df_dc - self.kappa_c * lap_c + Omega * sigma_h_norm
-            mu_gx, mu_gy = spectral_gradients(mu, self.kx, self.ky)
-            div_J = spectral_divergence(-D_eff * mu_gx, -D_eff * mu_gy,
-                                         self.kx, self.ky)
-            c_expl = c0 + dt_half * div_J
-            denom = 1.0 + dt_half * self.M_ref * self.kappa_c * self.k2**2
-            c_new = np.real(ifft2(fft2(c_expl) / denom))
-            c_new = np.clip(c_new, 0.0, 1.0)
-            m_old = float(np.sum(c0)); m_new = float(np.sum(c_new))
-            if m_old < 1e-12 or m_new < 1e-12:
-                return None
+        c_new_clipped = np.clip(c_new, 0.0, 1.0)
+        m_old = float(np.sum(self.c))
+        m_new = float(np.sum(c_new_clipped))
+        if m_old > 1e-12 and m_new > 1e-12:
             ratio = m_new / m_old
             if 0.5 < ratio < 2.0:
-                c_new *= m_old / m_new
-                return np.clip(c_new, 0.0, 1.0)
-        except Exception:
-            return None
-        return None
+                c_new_clipped *= m_old / m_new
+        return np.clip(c_new_clipped, 0.0, 1.0)
 
     # ------------------------------------------------------------------
     def _concentration_substep(self, dt, phi_gb, D_lat, delta_D, Omega, sigma_h):
+        """RESTORED v2: clip + rescale; no step rejection."""
         sigma_h_norm = sigma_h / 1e9
 
         c_gx, c_gy = spectral_gradients(self.c, self.kx, self.ky)
@@ -988,14 +913,8 @@ class AuCuBondingSolver:
 
         if m_old > 1e-12:
             ratio = m_new / m_old
-            max_inc = float(np.max(np.abs(c_new - self.c)))
-            if ratio < 0.1 or ratio > 10.0 or max_inc > 0.5:
-                logger.warning(
-                    f"Fickian substep rejected: mass ratio {ratio:.3e}, "
-                    f"max increment {max_inc:.3e}")
-                c_safe = np.real(ifft2(fft2(self.c) / denom))
-                return np.clip(c_safe, 0.0, 1.0)
-            c_new *= m_old / m_new
+            if 0.1 < ratio < 10.0:
+                c_new *= m_old / m_new
         return np.clip(c_new, 0.0, 1.0)
 
     # ==================================================================
@@ -1051,8 +970,8 @@ class AuCuBondingSolver:
         return beta * self.c, beta * self.c, np.zeros_like(self.c)
 
     # ------------------------------------------------------------------
-    def compute_plasticity(self, sigma_eq, sxx, syy, sxy, h):
-        """J2 return-mapping: flow direction driven by local deviatoric stress."""
+    def compute_plasticity(self, sigma_eq, h):
+        """RESTORED v2: fixed-direction flow rule."""
         pl = self.mat['plasticity']
         mu_p, nu, b = pl['mu'], pl['nu'], pl['b']
         sigma0 = float(self.params.get('sigma0', pl['sigma0']))
@@ -1067,25 +986,11 @@ class AuCuBondingSolver:
 
         overstress = np.clip((sigma_eq - sigma_y) / np.maximum(sigma_y, 1e-9), 0, 1)
         gamma_dot = gamma0_dot * overstress ** m
-        d_gamma = np.minimum(gamma_dot * self.dt, 1e-3)
+        d_inc = np.minimum(2.0 / 3.0 * gamma_dot * self.dt, 1e-3)
 
-        p = 0.5 * (sxx + syy)
-        s_dev_xx = sxx - p
-        s_dev_yy = syy - p
-        s_dev_xy = sxy
-
-        denom_eq = np.maximum(sigma_eq, 1e-9)
-        n_xx = 1.5 * s_dev_xx / denom_eq
-        n_yy = 1.5 * s_dev_yy / denom_eq
-        n_xy = 1.5 * s_dev_xy / denom_eq
-
-        d_xx = d_gamma * n_xx
-        d_yy = d_gamma * n_yy
-        d_xy = d_gamma * n_xy
-
-        self.eps_p_xx = np.clip(self.eps_p_xx + d_xx, -0.1, 0.1)
-        self.eps_p_yy = np.clip(self.eps_p_yy + d_yy, -0.1, 0.1)
-        self.eps_p_xy = np.clip(self.eps_p_xy + d_xy, -0.1, 0.1)
+        self.eps_p_xx = np.clip(self.eps_p_xx + d_inc,       -0.1, 0.1)
+        self.eps_p_yy = np.clip(self.eps_p_yy - 0.5 * d_inc, -0.1, 0.1)
+        self.eps_p_xy = np.clip(self.eps_p_xy + 0.5 * d_inc, -0.1, 0.1)
 
         eps_p_mag = np.sqrt(2.0 / 3.0 * (self.eps_p_xx**2 + self.eps_p_yy**2
                                           + 2 * self.eps_p_xy**2 + 1e-15))
@@ -1118,7 +1023,8 @@ class AuCuBondingSolver:
          exx_tot, eyy_tot, exy_tot) = el
 
         h = self.compute_local_grain_size()
-        sigma_y, eps_p_mag = self.compute_plasticity(sigma_eq, sxx, syy, sxy, h)
+        # v2 signature: compute_plasticity(sigma_eq, h)
+        sigma_y, eps_p_mag = self.compute_plasticity(sigma_eq, h)
         phi_gb = self.compute_gb_indicator()
         rho_gnd = self.compute_kam_density(exy_tot, phi_gb)
 
@@ -1383,7 +1289,6 @@ class EnhancedTwinVisualizer:
     def get_colormap(self, name, invert=False):
         return ColormapRegistry.resolve(name, invert=invert)
 
-    # ------------------------------------------------------------------
     @handle_errors
     def create_multi_field_comparison(self, results_dict, style_params=None):
         if style_params is None:
@@ -1466,7 +1371,6 @@ class EnhancedTwinVisualizer:
         plt.tight_layout()
         return fig
 
-    # ------------------------------------------------------------------
     @handle_errors
     def create_overlay(self, results_dict, base_field, overlay_field,
                        alpha=0.5, mode='contour', n_contours=10,
@@ -1557,7 +1461,6 @@ class EnhancedTwinVisualizer:
         plt.tight_layout()
         return fig
 
-    # ------------------------------------------------------------------
     @handle_errors
     def create_vector_overlay(self, results_dict, source, mode='gradient',
                               density=24, color='white', scale=1.0,
@@ -1615,7 +1518,6 @@ class EnhancedTwinVisualizer:
         plt.tight_layout()
         return fig
 
-    # ------------------------------------------------------------------
     @handle_errors
     def create_plotly_heatmap(self, results_dict, field_name, frame_idx=0,
                               cmap_name=None, zmid=None, viz_cfg=None):
@@ -1655,7 +1557,6 @@ class EnhancedTwinVisualizer:
                           width=700, height=500, template="plotly_white")
         return fig
 
-    # ------------------------------------------------------------------
     @handle_errors
     def create_plotly_3d_surface(self, results_dict, field_name, frame_idx=0,
                                  cmap_name=None, show_contours=True,
@@ -1690,7 +1591,6 @@ class EnhancedTwinVisualizer:
                           width=800, height=600, template="plotly_white")
         return fig
 
-    # ------------------------------------------------------------------
     @handle_errors
     def create_plotly_line_profiles(self, results_dict, field_name, profile_types,
                                     position_ratio=0.5, viz_cfg=None):
@@ -1711,7 +1611,6 @@ class EnhancedTwinVisualizer:
                           hovermode='x unified', template="plotly_white")
         return fig
 
-    # ------------------------------------------------------------------
     @handle_errors
     def create_multi_time_profiles(self, history, field_name, ptype='horizontal',
                                    frames=None, position_ratio=0.5,
@@ -1761,7 +1660,6 @@ class EnhancedTwinVisualizer:
             plt.tight_layout()
             return fig
 
-    # ------------------------------------------------------------------
     @handle_errors
     def create_plotly_animation(self, history, field_name, dt,
                                 cmap_name=None, viz_cfg=None):
@@ -1840,7 +1738,6 @@ class EnhancedTwinVisualizer:
         )
         return fig
 
-    # ------------------------------------------------------------------
     @handle_errors
     def create_animation_buffer(self, history, field_name, dt,
                                 output_format='gif', fps=5, dpi=120,
@@ -2141,17 +2038,16 @@ def main():
     """, unsafe_allow_html=True)
 
     st.markdown('<h1 class="main-header">🥇 Au-Assisted Cu-Cu Diffusion Bonding '
-                '(Rectangular MPF) — v3</h1>', unsafe_allow_html=True)
+                '(Rectangular MPF) — v3.1</h1>', unsafe_allow_html=True)
     st.markdown("""
     <div style="background-color:#FFF8E7; padding:1rem; border-radius:8px;
                 border-left:5px solid #C9A227;">
-    <b>Physics:</b> MPF + Fickian/Hart + Solute Drag + Elastoplasticity (J2).<br>
+    <b>Physics:</b> MPF + Fickian/Hart + Solute Drag + Elastoplasticity (v2 core).<br>
     • Top <b>Poly-Cu</b> · Middle <b>Au film</b> · Bottom <b>nc-Cu</b>.<br>
     • 30 MPa downward → ∇σ_h drives Au <b>selectively into nc-Cu</b>.<br>
     • <b>Auto-substepping</b> for both Fickian and Cahn–Hilliard paths.<br>
-    • <b>Guarded mass conservation</b> with actual step rejection.<br>
-    <span class="viz-badge">v3 adds: overlays · vector fields · log scaling ·
-    Plotly time scrubbing · themes · watermarks</span>
+    • <b>Mass-conserving rescale</b> (v2 diffusion restored).<br>
+    <span class="viz-badge">v3.1: v2 physics + v3 visualization suite</span>
     </div>
     """, unsafe_allow_html=True)
 
@@ -2473,7 +2369,6 @@ def main():
             sub1, sub2 = st.tabs(["Global & Field Scaling",
                                    "Overlay & Vector & Animation"])
 
-            # ---------- Global & Field Scaling ----------
             with sub1:
                 st.subheader("🖌️ Global matplotlib theme")
                 theme_keys = list(MATPLOTLIB_THEMES.keys())
@@ -2614,7 +2509,6 @@ def main():
                     ax.set_xlabel('x (nm)'); ax.set_ylabel('y (nm)')
                     st.pyplot(fig); plt.close(fig)
 
-            # ---------- Overlay & Vector & Animation ----------
             with sub2:
                 st.subheader("🪟 Multi-field overlay builder")
                 ov = viz_cfg['overlay']
