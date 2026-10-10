@@ -1,13 +1,11 @@
 """
 Au-assisted Cu-Cu diffusion bonding simulator — rectangular MPF edition
 =======================================================================
-Fixes vs. previous version:
-  (1) Rectangular domain Nx × Ny (independent dx, dy)
-  (2) Fickian + stress-drift mass transport (not phase-separating CH)
-  (3) nc-Cu grains individually resolved via categorical grain_map
-  (4) Anisotropic gradient energy + correct plane-strain Green's function
-      + KAM-like defect-density coupling + solute drag on GB mobility
-  (5) Curved Poly-Cu grains via Allen-Cahn relaxation of Voronoi map
+FIXES in this revision:
+  • axhline() on 2D wavy interface arrays → replaced with ax.plot()
+  • Added _extract_interface_profile() helper (robust to multi-valued interfaces)
+  • Added layer-boundary overlay in initial-geometry Au-concentration plot
+  • All other physics, geometry, visualization preserved unchanged
 """
 
 import numpy as np
@@ -79,6 +77,50 @@ def spectral_laplacian(field, k2):
 
 def spectral_divergence(fx, fy, kx, ky):
     return np.real(ifft2(1j * kx * fft2(fx) + 1j * ky * fft2(fy)))
+
+
+# ============================================================================
+# INTERFACE PROFILING HELPERS (fix for wavy 2D interface arrays)
+# ============================================================================
+def _extract_interface_profile(interface_2d):
+    """
+    Extract a representative 1D profile from a 2D interface-level field.
+
+    The interface field y_*(x, y) is a scalar level-set of the layer boundary.
+    For a boundary that only varies along x (which is our case: the wave was
+    built from np.sin(2π x / λ) broadcast across y), every row is identical,
+    so we simply return row 0.
+
+    If the interface has genuine y-variation (advanced geometry), we return
+    the column-wise mean so we still get a sensible 1D curve.
+    """
+    a = np.asarray(interface_2d)
+    if a.ndim == 0:
+        return None
+    if a.ndim == 1:
+        return a
+    # Same row everywhere? then just take row 0
+    if a.shape[0] > 1 and np.allclose(a[0, :], a[-1, :], atol=1e-9):
+        return a[0, :]
+    # Otherwise average over rows — graceful fallback
+    return np.mean(a, axis=0)
+
+
+def _plot_interface(ax, x_coords, interface_2d, **line_kwargs):
+    """
+    Plot a (possibly wavy) layer interface on an imshow axes.
+
+    If the interface is scalar (legacy case), use axhline.
+    If it is 1D/2D, use ax.plot with the extracted profile.
+    """
+    a = np.asarray(interface_2d)
+    if a.ndim == 0 or (a.ndim == 1 and a.size == 1):
+        ax.axhline(float(a), **line_kwargs)
+        return
+    profile = _extract_interface_profile(a)
+    if profile is None:
+        return
+    ax.plot(x_coords, profile, **line_kwargs)
 
 
 # ============================================================================
@@ -231,11 +273,12 @@ class MaterialProperties:
         if params.get('dx', 0) <= 0:  errors.append("dx must be positive")
         if params.get('Nx', 0) < 32 or params.get('Ny', 0) < 32:
             warns.append("N < 32 per axis may be inaccurate")
-        # Stability: explicit diffusion needs dt < dx²/(4 D_ref)
         D_ref = max(params.get('D_gb', 1.0), params.get('D_lattice', 0.01))
-        dt_stab = 0.25 * min(params.get('dx', 1.0)**2, params.get('dy', 1.0)**2) / max(D_ref, 1e-9)
+        dt_stab = 0.25 * min(params.get('dx', 1.0)**2,
+                             params.get('dy', 1.0)**2) / max(D_ref, 1e-9)
         if params.get('dt', 0) > dt_stab:
-            warns.append(f"dt > dx²/(4 D_gb) ≈ {dt_stab:.4f} — semi-implicit stabilizer engaged")
+            warns.append(f"dt > dx²/(4 D_gb) ≈ {dt_stab:.4f} — "
+                         f"semi-implicit stabilizer engaged")
         return errors, warns
 
 
@@ -251,10 +294,8 @@ def voronoi_assign(Nx, Ny, extent, seeds, mask=None, warp=None):
     if len(seeds) == 0:
         return np.full((Ny, Nx), -1, dtype=int)
 
-    # Optional domain warp (adds smooth waviness to boundaries)
     if warp is not None:
         wx, wy = warp
-        # subsample warp to pixel grid via nearest
         pts_w = pts.copy()
         ix = np.clip(((pts[:, 0] - extent[0]) / (extent[1] - extent[0]) *
                       (wx.shape[1] - 1)).astype(int), 0, wx.shape[1] - 1)
@@ -336,11 +377,11 @@ class AuCuBondingGeometry:
         y_poly_bot = y_top - total_h * poly_thickness_frac
         y_au_bot   = y_poly_bot - total_h * au_thickness_frac
 
-        # A small wavy warp of the layer interfaces (physical waviness)
+        # Wavy layer interfaces (2D arrays — the source of the axhline issue)
         interface_wave_amp = 1.5
         wave = interface_wave_amp * np.sin(2 * np.pi * self.X / 60.0)
-        y_poly_bot_eff = y_poly_bot + wave
-        y_au_bot_eff   = y_au_bot   + 0.5 * wave
+        y_poly_bot_eff = y_poly_bot + wave        # shape (Ny, Nx)
+        y_au_bot_eff   = y_au_bot   + 0.5 * wave  # shape (Ny, Nx)
 
         mask_poly = self.Y > y_poly_bot_eff
         mask_au   = (self.Y <= y_poly_bot_eff) & (self.Y > y_au_bot_eff)
@@ -430,14 +471,7 @@ class AuCuBondingGeometry:
 # ============================================================================
 class SpectralElasticSolver:
     """
-    Solve ∇·σ = 0 for σ = C:(ε_total - ε*) using Fourier-space
-    Green's function of the 2D plane-strain operator:
-
-        M_ik(k) = (λ+μ) k_i k_k + μ k² δ_ik
-        u_i(k)  = M^{-1}_ik(k) · f_k(k)
-        f_i(k)  = k_j C_ijkl ε*_kl  (equivalent body-force)
-
-        M^{-1} = (1/(μ k²)) [δ_ik - ((λ+μ)/(λ+2μ)) (k_i k_k)/k²]
+    Solve ∇·σ = 0 for σ = C:(ε_total - ε*) via plane-strain Fourier Green's fn.
     """
 
     def __init__(self, Nx, Ny, dx, dy, elastic_params, kx=None, ky=None, k2=None):
@@ -463,13 +497,11 @@ class SpectralElasticSolver:
         self.G11 = inv_mu_k2 * (1.0 - ratio * (self.kx**2) / k2)
         self.G12 = inv_mu_k2 * (-ratio * self.kx * self.ky / k2)
         self.G22 = inv_mu_k2 * (1.0 - ratio * (self.ky**2) / k2)
-        # Zero the DC mode (rigid-body translation)
         self.G11[0, 0] = self.G12[0, 0] = self.G22[0, 0] = 0.0
 
     @handle_errors
     def solve(self, exx_star, eyy_star, exy_star,
               app_xx=0.0, app_yy=0.0, app_xy=0.0):
-        """Return (sigma_eq, sxx, syy, sxy, sigma_h, exx, eyy, exy)."""
         exx_h = fft2(exx_star)
         eyy_h = fft2(eyy_star)
         exy_h = fft2(exy_star)
@@ -483,25 +515,17 @@ class SpectralElasticSolver:
         ux_h = self.G11 * fx_h + self.G12 * fy_h
         uy_h = self.G12 * fx_h + self.G22 * fy_h
 
-        # Elastic perturbation strain
         exx_el = np.real(ifft2(1j * self.kx * ux_h))
         eyy_el = np.real(ifft2(1j * self.ky * uy_h))
         exy_el = 0.5 * np.real(ifft2(1j * (self.kx * uy_h + self.ky * ux_h)))
 
-        # Total strain = elastic + eigenstrain
         exx = exx_el + exx_star
         eyy = eyy_el + eyy_star
         exy = exy_el + exy_star
 
-        # Stress from the FFT part (using elastic strain)
-        sxx = self.C11_2d * exx_el + self.C12_2d * eyy_el
-        syy = self.C12_2d * exx_el + self.C11_2d * eyy_el
-        sxy = 2 * self.C44_2d * exy_el
-
-        # Add applied uniform stress
-        sxx = sxx + app_xx
-        syy = syy + app_yy
-        sxy = sxy + app_xy
+        sxx = self.C11_2d * exx_el + self.C12_2d * eyy_el + app_xx
+        syy = self.C12_2d * exx_el + self.C11_2d * eyy_el + app_yy
+        sxy = 2 * self.C44_2d * exy_el + app_xy
 
         sigma_eq = np.sqrt(0.5 * ((sxx - syy)**2 + syy**2 + sxx**2 + 6 * sxy**2))
         sigma_eq = np.clip(sigma_eq, 0, 5e9)
@@ -528,7 +552,6 @@ class AuCuBondingSolver:
         self.kx, self.ky, self.k2 = make_k_vectors(self.Nx, self.Ny,
                                                    self.dx, self.dy)
 
-        # Geometry
         self.geom = AuCuBondingGeometry(self.Nx, self.Ny, self.dx, self.dy)
         (self.c, self.eta_list, self.grain_map,
          self.layer_id, self.geom_meta) = self.geom.build(
@@ -540,7 +563,6 @@ class AuCuBondingSolver:
             poly_curve_amp=params.get('poly_curve_amp', 8.0),
             seed=params.get('seed', 1234))
 
-        # Grain-boundary relaxation to curve the poly-Cu grains
         self.eta_list = self._relax_grains(self.eta_list,
                                            n_steps=params.get('relax_steps', 40))
 
@@ -548,26 +570,21 @@ class AuCuBondingSolver:
         self.au_idx   = self.geom_meta['au_idx']
         self.n_poly   = self.geom_meta['n_poly']
 
-        # Assign per-grain preferred orientation for anisotropy
         rng = np.random.default_rng(params.get('seed', 1234))
         self.grain_theta = rng.uniform(0, 2 * np.pi, size=self.n_grains)
 
-        # Plastic strain
         self.eps_p_xx = np.zeros((self.Ny, self.Nx))
         self.eps_p_yy = np.zeros((self.Ny, self.Nx))
         self.eps_p_xy = np.zeros((self.Ny, self.Nx))
 
-        # Elastic solver
         self.elastic = SpectralElasticSolver(
             self.Nx, self.Ny, self.dx, self.dy, self.mat['elastic'],
             self.kx, self.ky, self.k2)
 
-        # Coefficients
         self.kappa_eta = params.get('kappa_eta', 1.0)
         self.aniso_strength = params.get('aniso_strength', 0.3)
         self.L_ref = params.get('L_ref', 1.0)
 
-        # History
         self.history = {
             'time': [], 'c_top': [], 'c_bot': [],
             'gb_top': [], 'gb_bot': [],
@@ -576,13 +593,10 @@ class AuCuBondingSolver:
             'au_mass': [],
         }
 
-    # ----------------------------------------------------------------
     def _relax_grains(self, etas, n_steps=40):
-        """Pure curvature-driven Allen-Cahn relaxation to curve boundaries."""
         if n_steps <= 0:
             return etas
         etas = [e.copy() for e in etas]
-        # Stability: dt_relax < dx² / (4 κ) / (# neighbors)
         dt_relax = 0.15 * min(self.dx**2, self.dy**2) / max(self.kappa_eta, 1e-9)
         for _ in range(n_steps):
             new = []
@@ -595,7 +609,6 @@ class AuCuBondingSolver:
             etas = [e / s for e in new]
         return etas
 
-    # ----------------------------------------------------------------
     def compute_gb_indicator(self):
         s = np.zeros((self.Ny, self.Nx))
         for e in self.eta_list:
@@ -603,25 +616,12 @@ class AuCuBondingSolver:
         return np.clip(1.0 - s, 0, 1)
 
     def compute_local_grain_size(self):
-        """Proxy for local grain diameter from gradient of Ση."""
         s = np.sum(self.eta_list, axis=0)
         gx, gy = spectral_gradients(s, self.kx, self.ky)
         gm = np.sqrt(gx**2 + gy**2 + 1e-15)
         return np.clip(2.0 / gm, 0, 300.0)
 
-    # ----------------------------------------------------------------
     def evolve_concentration(self, sigma_h):
-        """
-        Fickian + stress drift (NOT phase-separating CH):
-
-            J = -D_eff ∇c - D_eff Ω c ∇σ_h
-            ∂c/∂t = -∇·J
-
-        IMEX split for stability:
-            D_eff = D_ref + δD(x)
-            implicit:   D_ref ∇²c^{n+1}
-            explicit:   ∇·(δD ∇c^n) + drift
-        """
         phi_gb = self.compute_gb_indicator()
 
         D_lat = float(self.params.get('D_lattice', 0.01))
@@ -630,14 +630,12 @@ class AuCuBondingSolver:
 
         D_eff = D_lat + (D_gb - D_lat) * phi_gb
         D_ref = float(np.max(D_eff)) + 1e-12
-        delta_D = D_eff - D_ref                 # ≤ 0 everywhere
+        delta_D = D_eff - D_ref
 
-        # Explicit diffusive flux with δD
         c_gx, c_gy = spectral_gradients(self.c, self.kx, self.ky)
         Jx_d = -delta_D * c_gx
         Jy_d = -delta_D * c_gy
 
-        # Stress drift
         sig_gx, sig_gy = spectral_gradients(sigma_h, self.kx, self.ky)
         Jx_s = -D_eff * Omega * self.c * sig_gx
         Jy_s = -D_eff * Omega * self.c * sig_gy
@@ -646,19 +644,11 @@ class AuCuBondingSolver:
         Jy = Jy_d + Jy_s
         div_J = spectral_divergence(Jx, Jy, self.kx, self.ky)
 
-        # IMEX: c^{n+1} - dt D_ref ∇²c^{n+1} = c^n + dt div_J_explicit
         c_hat = fft2(self.c + self.dt * div_J)
         c_new = np.real(ifft2(c_hat / (1.0 + self.dt * D_ref * self.k2)))
         return np.clip(c_new, 0, 1), D_eff
 
-    # ----------------------------------------------------------------
     def evolve_grains(self):
-        """
-        Allen-Cahn for all η_i with:
-          - solute drag         L_eff = L0 / (1 + α c²)
-          - anisotropic κ       κ_i(θ) = κ0 (1 + δ cos(2(θ-θ_i)))
-          - implicit curvature  stabilizer 1/(1+dt·L_ref·κ0·k²)
-        """
         A = float(self.params.get('A', 5.0))
         B = float(self.params.get('B', 10.0))
         L0 = float(self.params.get('L_eta', 1.0))
@@ -673,36 +663,29 @@ class AuCuBondingSolver:
 
         new_list = []
         for i, e in enumerate(self.eta_list):
-            # --- local free energy derivative ---
             others_sq = total_sq - sq[i]
             df_de_loc = 2 * A * e * (1 - e) * (1 - 2 * e) + 2 * B * e * others_sq
 
-            # --- anisotropic gradient term ---
             gx, gy = spectral_gradients(e, self.kx, self.ky)
             mag = np.sqrt(gx**2 + gy**2 + 1e-12)
             nx = gx / mag
             ny = gy / mag
             theta_n = np.arctan2(ny, nx)
             theta_i = self.grain_theta[i]
-            # Cubic-in-2D anisotropy: κ(n) = κ0 [1 + δ cos(2(θ_n - θ_i))]
             kappa_aniso = kappa0 * (1.0 + delta_aniso *
                                     np.cos(2.0 * (theta_n - theta_i)))
-            # ∇·(κ ∇η) via two spectral gradients
+
             kx_gx, ky_gx = spectral_gradients(kappa_aniso * gx, self.kx, self.ky)
             kx_gy, ky_gy = spectral_gradients(kappa_aniso * gy, self.kx, self.ky)
-            # Note: we take div of (κ ∇η) as ∂_x(κ ∂_x η) + ∂_y(κ ∂_y η)
             grad_term = kx_gx + ky_gy
 
-            # --- assemble right-hand side ---
             R_expl = -L_eff * (df_de_loc - grad_term)
 
-            # --- IMEX step: implicit isotropic curvature stabilizer ---
             e_expl = e + self.dt * R_expl
             denom = 1.0 + self.dt * self.L_ref * kappa0 * self.k2
             e_new = np.real(ifft2(fft2(e_expl) / denom))
             new_list.append(np.clip(e_new, 0, 1))
 
-        # Normalize Ση ≤ 1
         ssum = np.sum(new_list, axis=0)
         mask = ssum > 1.0
         if np.any(mask):
@@ -710,13 +693,9 @@ class AuCuBondingSolver:
             new_list = [np.where(mask, e / ssum_safe, e) for e in new_list]
         return new_list
 
-    # ----------------------------------------------------------------
     def compute_eigenstrain(self):
         beta = float(self.params.get('misfit_beta', 0.045))
-        exx_star = beta * self.c
-        eyy_star = beta * self.c
-        exy_star = np.zeros_like(self.c)
-        return exx_star, eyy_star, exy_star
+        return beta * self.c, beta * self.c, np.zeros_like(self.c)
 
     def compute_plasticity(self, sigma_eq, h):
         pl = self.mat['plasticity']
@@ -744,53 +723,39 @@ class AuCuBondingSolver:
         return sigma_y, eps_p_mag
 
     def compute_kam_density(self, exy_total, gb_indicator):
-        """
-        KAM-like local dislocation density:
-            ρ_GND ∝ |∇ε_xy| × φ_gb
-        Used to modulate the effective D_gb (dislocations are fast pipes).
-        """
         exy_gx, exy_gy = spectral_gradients(exy_total, self.kx, self.ky)
         geom_factor = np.sqrt(exy_gx**2 + exy_gy**2)
         rho = geom_factor * (0.5 + 0.5 * gb_indicator)
-        # Normalize
         rho_max = np.max(rho) if np.max(rho) > 1e-15 else 1.0
         return np.clip(rho / rho_max, 0, 1)
 
-    # ----------------------------------------------------------------
     @handle_errors
     def step(self):
-        # Applied stress (default 30 MPa downward → θ=90°)
         sig = float(self.params.get('applied_stress', 30e6))
         theta = np.deg2rad(float(self.params.get('applied_stress_angle', 90.0)))
         app_xx = sig * np.cos(theta)**2
         app_yy = sig * np.sin(theta)**2
         app_xy = sig * np.sin(theta) * np.cos(theta)
 
-        # Eigenstrain from Au-Cu misfit + plastic strain
         exx_s, eyy_s, exy_s = self.compute_eigenstrain()
         exx_t = exx_s + self.eps_p_xx
         eyy_t = eyy_s + self.eps_p_yy
         exy_t = exy_s + self.eps_p_xy
 
-        # Elastic solve
         (sigma_eq, sxx, syy, sxy, sigma_h,
          exx_tot, eyy_tot, exy_tot) = self.elastic.solve(
             exx_t, eyy_t, exy_t, app_xx, app_yy, app_xy)
 
-        # Local grain size / plasticity / KAM
         h = self.compute_local_grain_size()
         sigma_y, eps_p_mag = self.compute_plasticity(sigma_eq, h)
         phi_gb = self.compute_gb_indicator()
         rho_gnd = self.compute_kam_density(exy_tot, phi_gb)
 
-        # Evolve c (Fickian + stress drift + Hart's D)
         c_new, D_eff = self.evolve_concentration(sigma_h)
         self.c = c_new
 
-        # Evolve grains (AC with solute drag + anisotropy)
         self.eta_list = self.evolve_grains()
 
-        # Region averages for diagnostics
         mtop = self.geom_meta['mask_poly']
         mbot = self.geom_meta['mask_nc']
         c_top = float(np.mean(self.c[mtop])) if mtop.any() else 0.0
@@ -800,10 +765,12 @@ class AuCuBondingSolver:
         gb_bot = float(np.mean(phi_gb_new[mbot])) if mbot.any() else 0.0
 
         au_mass = float(np.sum(self.c) * self.dx * self.dy)
-        energy = float(np.sum(0.5 * self.kappa_eta *
-                              sum(spectral_gradients(e, self.kx, self.ky)[0]**2 +
-                                  spectral_gradients(e, self.kx, self.ky)[1]**2
-                                  for e in self.eta_list)) * self.dx * self.dy)
+
+        grad_energy_sum = 0.0
+        for e in self.eta_list:
+            gx, gy = spectral_gradients(e, self.kx, self.ky)
+            grad_energy_sum += float(np.sum(gx**2 + gy**2))
+        energy = 0.5 * self.kappa_eta * grad_energy_sum * self.dx * self.dy
 
         t = (len(self.history['time']) + 1) * self.dt
 
@@ -818,7 +785,6 @@ class AuCuBondingSolver:
         self.history['energy'].append(energy)
         self.history['au_mass'].append(au_mass)
 
-        # Aggregate for visualization
         eta_poly = (np.sum([self.eta_list[i] for i in range(self.n_poly)], axis=0)
                     if self.n_poly else np.zeros_like(self.c))
         eta_au = self.eta_list[self.au_idx]
@@ -991,7 +957,6 @@ class EnhancedTwinVisualizer:
             interp = 'nearest' if fname in DISCRETE_FIELDS else 'bilinear'
 
             if fname == 'grain_map':
-                # Categorical: nearest-neighbor, no colorbar, discrete
                 im = ax.imshow(d, extent=self.extent, cmap=cmap,
                                origin='lower', aspect='equal',
                                interpolation='nearest')
@@ -1316,7 +1281,8 @@ def main():
     ✅ Individual nc-Cu grains via categorical <code>grain_map</code> colormap<br>
     ✅ Anisotropic gradient energy κ(θ) and correct plane-strain Green's function<br>
     ✅ Curved Poly-Cu boundaries via Allen-Cahn relaxation of Voronoi map<br>
-    ✅ KAM-like dislocation density ρ_GND and solute drag on GB mobility
+    ✅ KAM-like dislocation density ρ_GND and solute drag on GB mobility<br>
+    ✅ Wavy layer interfaces drawn with <code>ax.plot</code> (axhline fix)
     </div>
     """, unsafe_allow_html=True)
 
@@ -1472,28 +1438,48 @@ def main():
                        f"grid: {Nx} × {Ny}")
 
             extent = [-Nx*dx/2, Nx*dx/2, -Ny*dy/2, Ny*dy/2]
+            x_coords = np.linspace(extent[0], extent[1], Nx)
             gm = st.session_state.gm0
+
+            # ---- Grain map with wavy interface overlay (FIXED) ------
             fig, ax = plt.subplots(figsize=(10, 4.5))
             cmap = ColormapRegistry.resolve('grain_map')
             im = ax.imshow(gm, extent=extent, origin='lower', cmap=cmap,
                            interpolation='nearest', aspect='equal')
-            ax.axhline(meta['y_poly_bot_eff'], color='white', lw=1.5, ls='--')
-            ax.axhline(meta['y_au_bot_eff'], color='yellow', lw=2.0)
-            ax.set_title("Voronoi grain map (white dashed = Poly/Au; yellow = Au/nc)")
+
+            # FIX: The interfaces are 2D wavy arrays — plot them, don't axhline them.
+            _plot_interface(ax, x_coords, meta['y_poly_bot_eff'],
+                            color='white', lw=1.5, ls='--',
+                            label='Poly-Cu / Au interface')
+            _plot_interface(ax, x_coords, meta['y_au_bot_eff'],
+                            color='yellow', lw=2.0,
+                            label='Au / nc-Cu interface')
+
+            ax.set_title("Voronoi grain map  "
+                         "(white dashed = Poly/Au, yellow = Au/nc)")
             ax.set_xlabel('x (nm)'); ax.set_ylabel('y (nm)')
+            ax.legend(loc='upper right', framealpha=0.85)
             st.pyplot(fig); plt.close(fig)
 
+            # ---- Au concentration with the same interface overlay --
             c0 = st.session_state.c0
             fig, ax = plt.subplots(figsize=(10, 4.5))
             cmap_c = ColormapRegistry.resolve(st.session_state.global_cmaps['phi'])
             im = ax.imshow(c0, extent=extent, origin='lower', cmap=cmap_c,
                            vmin=0, vmax=1, aspect='equal')
+
+            _plot_interface(ax, x_coords, meta['y_poly_bot_eff'],
+                            color='white', lw=1.5, ls='--')
+            _plot_interface(ax, x_coords, meta['y_au_bot_eff'],
+                            color='yellow', lw=2.0)
+
             plt.colorbar(im, ax=ax, label='c (Au)')
             ax.set_title(f"Initial Au concentration · film thickness ≈ "
                          f"{meta['y_poly_bot']-meta['y_au_bot']:.1f} nm")
+            ax.set_xlabel('x (nm)'); ax.set_ylabel('y (nm)')
             st.pyplot(fig); plt.close(fig)
 
-            # Show a few individual η fields for the poly layer
+            # ---- Individual Poly-Cu η fields -----------------------
             with st.expander("Individual Poly-Cu η fields (check curvature)",
                              expanded=False):
                 eta0 = st.session_state.eta0
@@ -1503,7 +1489,8 @@ def main():
                     axes = np.atleast_1d(axes)
                     for i in range(n_show):
                         axes[i].imshow(eta0[i], extent=extent, origin='lower',
-                                       cmap='Blues', vmin=0, vmax=1, aspect='equal')
+                                       cmap='Blues', vmin=0, vmax=1,
+                                       aspect='equal')
                         axes[i].set_title(f"η_{i}")
                         axes[i].set_xlabel('x (nm)')
                     plt.tight_layout()
@@ -1537,20 +1524,23 @@ def main():
                     history, timesteps = [], []
                     progress = st.progress(0)
                     status = st.empty()
-                    live_metrics = st.empty()
 
                     for step in range(n_steps):
                         res = solver.step()
                         if step % save_freq == 0 or step == n_steps - 1:
-                            history.append({k: (v.copy() if isinstance(v, np.ndarray)
-                                                else v) for k, v in res.items()})
+                            history.append({k: (v.copy()
+                                                if isinstance(v, np.ndarray)
+                                                else v)
+                                            for k, v in res.items()})
                             timesteps.append(step * params['dt'])
                         progress.progress((step+1) / n_steps)
                         if step % max(1, n_steps // 20) == 0:
-                            status.text(f"Step {step+1}/{n_steps} · "
-                                        f"c_top={solver.history['c_top'][-1]:.4f} · "
-                                        f"c_bot={solver.history['c_bot'][-1]:.4f} · "
-                                        f"Δc={solver.history['c_bot'][-1]-solver.history['c_top'][-1]:+.4f}")
+                            status.text(
+                                f"Step {step+1}/{n_steps} · "
+                                f"c_top={solver.history['c_top'][-1]:.4f} · "
+                                f"c_bot={solver.history['c_bot'][-1]:.4f} · "
+                                f"Δc="
+                                f"{solver.history['c_bot'][-1]-solver.history['c_top'][-1]:+.4f}")
 
                     st.success(f"✅ Done. {len(history)} frames saved.")
                     st.session_state.history = history
@@ -1580,15 +1570,21 @@ def main():
                 t = np.array(solver.history['time'])
 
                 fig, axes = plt.subplots(2, 2, figsize=(13, 8))
-                axes[0, 0].plot(t, solver.history['c_top'], 'b-', lw=2, label='Poly-Cu (top)')
-                axes[0, 0].plot(t, solver.history['c_bot'], 'r-', lw=2, label='nc-Cu (bottom)')
-                axes[0, 0].set_xlabel('t (ns)'); axes[0, 0].set_ylabel('mean c (Au)')
+                axes[0, 0].plot(t, solver.history['c_top'], 'b-', lw=2,
+                                label='Poly-Cu (top)')
+                axes[0, 0].plot(t, solver.history['c_bot'], 'r-', lw=2,
+                                label='nc-Cu (bottom)')
+                axes[0, 0].set_xlabel('t (ns)')
+                axes[0, 0].set_ylabel('mean c (Au)')
                 axes[0, 0].set_title('Au concentration: Poly-Cu vs nc-Cu')
                 axes[0, 0].legend(); axes[0, 0].grid(True, alpha=0.3)
 
-                axes[0, 1].plot(t, solver.history['gb_top'], 'b-', lw=2, label='Poly-Cu')
-                axes[0, 1].plot(t, solver.history['gb_bot'], 'r-', lw=2, label='nc-Cu')
-                axes[0, 1].set_xlabel('t (ns)'); axes[0, 1].set_ylabel('mean φ_gb')
+                axes[0, 1].plot(t, solver.history['gb_top'], 'b-', lw=2,
+                                label='Poly-Cu')
+                axes[0, 1].plot(t, solver.history['gb_bot'], 'r-', lw=2,
+                                label='nc-Cu')
+                axes[0, 1].set_xlabel('t (ns)')
+                axes[0, 1].set_ylabel('mean φ_gb')
                 axes[0, 1].set_title('GB density (Hart indicator)')
                 axes[0, 1].legend(); axes[0, 1].grid(True, alpha=0.3)
 
@@ -1596,11 +1592,11 @@ def main():
                                 'g-', lw=2, label='Avg')
                 axes[1, 0].plot(t, np.array(solver.history['max_stress'])/1e9,
                                 'g--', lw=1.5, label='Max')
-                axes[1, 0].set_xlabel('t (ns)'); axes[1, 0].set_ylabel('σ (GPa)')
+                axes[1, 0].set_xlabel('t (ns)')
+                axes[1, 0].set_ylabel('σ (GPa)')
                 axes[1, 0].set_title('Stress evolution')
                 axes[1, 0].legend(); axes[1, 0].grid(True, alpha=0.3)
 
-                # Mass conservation and c ratio
                 au_mass = np.array(solver.history['au_mass'])
                 axes[1, 1].plot(t, au_mass / au_mass[0], 'k-', lw=2,
                                 label='Au mass / initial')
@@ -1613,7 +1609,8 @@ def main():
                 axes[1, 1].set_xlabel('t (ns)')
                 axes[1, 1].set_ylabel('mass ratio')
                 axes[1, 1].set_title('Mass conservation')
-                axes[1, 1].legend(loc='upper left'); ax2.legend(loc='upper right')
+                axes[1, 1].legend(loc='upper left')
+                ax2.legend(loc='upper right')
                 axes[1, 1].grid(True, alpha=0.3)
 
                 plt.tight_layout()
@@ -1634,7 +1631,8 @@ def main():
                 ptype = st.selectbox("Profile direction",
                                       ["horizontal", "vertical", "diagonal",
                                        "anti_diagonal"], key="lp_ptype")
-                pos = st.slider("Position ratio", 0.0, 1.0, 0.5, 0.05, key="lp_pos")
+                pos = st.slider("Position ratio", 0.0, 1.0, 0.5, 0.05,
+                                key="lp_pos")
 
                 d, unit = _rescale_field(field, res[field])
                 dist, prof, _ = profiler.extract_profile(d, ptype, pos)
@@ -1658,12 +1656,13 @@ def main():
                 vis = EnhancedTwinVisualizer(Nx, Ny, dx, dy, dt=params['dt'])
                 field = st.selectbox("Field", list(FIELD_DEFAULT_CMAPS.keys()),
                                       index=0, key="px_field")
-                cmap = st.session_state.global_cmaps.get(field,
-                                                          FIELD_DEFAULT_CMAPS[field])
+                cmap = st.session_state.global_cmaps.get(
+                    field, FIELD_DEFAULT_CMAPS[field])
                 fig_h = vis.create_plotly_heatmap(history[idx], field, idx, cmap)
                 if fig_h is not None:
                     st.plotly_chart(fig_h, use_container_width=True)
-                fig_3d = vis.create_plotly_3d_surface(history[idx], field, idx, cmap)
+                fig_3d = vis.create_plotly_3d_surface(history[idx], field, idx,
+                                                       cmap)
                 if fig_3d is not None:
                     st.plotly_chart(fig_3d, use_container_width=True)
 
@@ -1691,13 +1690,15 @@ def main():
                     if st.button("CSV (zip)"):
                         extent = [-Nx*dx/2, Nx*dx/2, -Ny*dy/2, Ny*dy/2]
                         buf, fname = DataExporter.export_csv(history, name,
-                                                              extent, Nx, Ny, dx, dy)
+                                                              extent, Nx, Ny,
+                                                              dx, dy)
                         st.download_button("Download .zip", buf, fname)
                     if st.button("HDF5"):
                         buf, fname = DataExporter.export_hdf5(sim_data, params,
                                                                history, name,
                                                                Nx, Ny, dx, dy)
-                        if buf: st.download_button("Download .h5", buf, fname)
+                        if buf:
+                            st.download_button("Download .h5", buf, fname)
 
                 st.markdown("---")
                 anim_field = st.selectbox("Animation field",
