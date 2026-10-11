@@ -14,8 +14,9 @@ Phase Field FFT Solver (Allen-Cahn, Cahn-Hilliard and Mechanics)
 
 [![continuummodelnt2d](https://img.shields.io/badge/audiff7-streamlit-red)](https://preferential-au-diffusion7.streamlit.app/) (customization of the visualizations, diffusion correction  and  simulation produced stable results , basic code, geometry change of domain from square to rectangle)
 
-[![continuummodelnt2d](https://img.shields.io/badge/audiff7a-streamlit-red)](https://preferential-au-diffusion7a.streamlit.app/) (customization of the visualizations, diffusion correction  and  simulation produced stable results , basic code, geometry change of domain from square to rectangle)
+[![continuummodelnt2d](https://img.shields.io/badge/audiff7a-streamlit-red)](https://preferential-au-diffusion7a.streamlit.app/) (c var visualization fixed, customization of the visualizations, diffusion correction  and  simulation produced stable results , basic code, geometry change of domain from square to rectangle)
 
+[![continuummodelnt2d](https://img.shields.io/badge/audiff8-streamlit-red)](https://preferential-au-diffusion8.streamlit.app/) (c variable annotated properly within the calculation framework, customization of the visualizations, diffusion correction  and  simulation produced stable results , basic code, geometry change of domain from square to rectangle)
 
 
 
