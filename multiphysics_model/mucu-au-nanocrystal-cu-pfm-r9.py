@@ -1,7 +1,13 @@
 """
-Au-assisted Cu-Cu diffusion bonding simulator — rectangular MPF edition (v3.4)
+Au-assisted Cu-Cu diffusion bonding simulator — rectangular MPF edition (v3.4.1)
 ===============================================================================
 Physics: MPF + Fickian/Hart diffusion + Solute Drag + Elastoplasticity.
+
+v3.4.1 hotfix:
+  * Fix StreamlitMixedNumericTypesError on the 'Marker size' and 'Tick length'
+    number_input widgets — these mixed `value=float(...)` with int min/max/step.
+    Now coerces the value to int via a small try/except guard so all four
+    args are guaranteed to be the same Python type.
 
 v3.4 changes:
   * TIME-UNIT SELECTOR (physics-preserving). The sidebar now exposes a
@@ -3188,7 +3194,13 @@ def main():
                                                 min_value=0.1, max_value=8.0, step=0.1,
                                                 key="fc_lwm")
                 with c3:
-                    ms = st.number_input("Marker size", value=float(fc.get('marker_size', 6)),
+                    # v3.4.1: all int (StreamlitMixedNumericTypesError fix)
+                    _ms_val = fc.get('marker_size', 6)
+                    try:
+                        _ms_val = int(_ms_val) if _ms_val is not None else 6
+                    except (TypeError, ValueError):
+                        _ms_val = 6
+                    ms = st.number_input("Marker size", value=_ms_val,
                                           min_value=1, max_value=30, step=1,
                                           key="fc_ms")
                 with c4:
@@ -3287,7 +3299,13 @@ def main():
                                        index=['out', 'in', 'inout'].index(fc.get('tick_direction', 'out')),
                                        key="fc_td")
                 with c2:
-                    tl = st.number_input("Tick length", value=float(fc.get('tick_length', 4)),
+                    # v3.4.1: all int (StreamlitMixedNumericTypesError fix)
+                    _tl_val = fc.get('tick_length', 4)
+                    try:
+                        _tl_val = int(_tl_val) if _tl_val is not None else 4
+                    except (TypeError, ValueError):
+                        _tl_val = 4
+                    tl = st.number_input("Tick length", value=_tl_val,
                                           min_value=0, max_value=20, step=1,
                                           key="fc_tl")
 
