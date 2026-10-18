@@ -31,5 +31,10 @@
 [![continuummodelnt2d](https://img.shields.io/badge/audiff10-streamlit-blue)](https://preferential-au-diffusion10.streamlit.app/) (temporal features, limiting the edges of colorscale bars, c variable annotated properly within the calculation framework, customization of the visualizations, diffusion correction  and  simulation produced stable results , basic code, geometry change of domain from square to rectangle)
 
 
+## r11: Domain size 800 nm x 400 nm, t in s
+
+[![continuummodelnt2d](https://img.shields.io/badge/audiff11-streamlit-blue)](https://preferential-au-diffusion11.streamlit.app/) (temporal features, limiting the edges of colorscale bars, c variable annotated properly within the calculation framework, customization of the visualizations, diffusion correction  and  simulation produced stable results , basic code, geometry change of domain from square to rectangle)
+
+
 
 
