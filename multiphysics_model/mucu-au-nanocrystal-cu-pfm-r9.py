@@ -1,7 +1,14 @@
 """
-Au-assisted Cu-Cu diffusion bonding simulator — rectangular MPF edition (v3.4.1)
+Au-assisted Cu-Cu diffusion bonding simulator — rectangular MPF edition (v3.4.2)
 ===============================================================================
 Physics: MPF + Fickian/Hart diffusion + Solute Drag + Elastoplasticity.
+
+v3.4.2 hotfix:
+  * Fix StreamlitDuplicateElementKey on key='fc_tl'. The 'Use tight_layout'
+    checkbox and the 'Tick length' number_input both abbreviated to 'fc_tl'
+    and collided. Renamed the checkbox to 'fc_tight_layout' and the
+    number_input to 'fc_tick_length'. Audited all other `key=` arguments
+    in the file — no further duplicates found.
 
 v3.4.1 hotfix:
   * Fix StreamlitMixedNumericTypesError on the 'Marker size' and 'Tick length'
@@ -3251,7 +3258,7 @@ def main():
                                               key="fc_eq")
                     tight_layout = st.checkbox("Use tight_layout",
                                                 value=bool(fc.get('tight_layout', True)),
-                                                key="fc_tl")
+                                                key="fc_tight_layout")
 
                 xlim_cur = fc.get('xlim', (None, None))
                 ylim_cur = fc.get('ylim', (None, None))
@@ -3299,7 +3306,9 @@ def main():
                                        index=['out', 'in', 'inout'].index(fc.get('tick_direction', 'out')),
                                        key="fc_td")
                 with c2:
-                    # v3.4.1: all int (StreamlitMixedNumericTypesError fix)
+                    # v3.4.2: all int (StreamlitMixedNumericTypesError fix)
+                    # v3.4.2: renamed key fc_tl → fc_tick_length to avoid
+                    # collision with tight_layout checkbox (fc_tl was used twice).
                     _tl_val = fc.get('tick_length', 4)
                     try:
                         _tl_val = int(_tl_val) if _tl_val is not None else 4
@@ -3307,7 +3316,7 @@ def main():
                         _tl_val = 4
                     tl = st.number_input("Tick length", value=_tl_val,
                                           min_value=0, max_value=20, step=1,
-                                          key="fc_tl")
+                                          key="fc_tick_length")
 
                 if st.button("💾 Save figure customization", key="fc_save",
                               type="primary"):
