@@ -2505,7 +2505,7 @@ def main():
 
             poly_gs   = st.slider("Poly-Cu grain size target (nm)",
                                    50.0, 500.0, 150.0, 10.0)
-            nc_gs     = st.slider("nc-Cu grain size (nm)", 5.0, 60.0, 15.0, 1.0)
+            nc_gs     = st.slider("nc-Cu grain size (nm)", 5.0, 150.0, 95.0, 1.0)
             gb_w      = st.slider("GB width (nm)", 0.5, 5.0, 1.5, 0.1)
             curve_amp = st.slider("Poly-Cu boundary waviness (nm)",
                                    0.0, 20.0, 8.0, 1.0)
