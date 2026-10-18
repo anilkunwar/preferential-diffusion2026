@@ -1,6 +1,10 @@
-Phase Field FFT Solver (Allen-Cahn, Cahn-Hilliard and Mechanics)
+# Phase Field FFT Solver (Allen-Cahn, Cahn-Hilliard and Mechanics)
+
+## r1: Domain size 100 nm x 100 nm, t in ns
 
 [![continuummodelnt2d](https://img.shields.io/badge/audiff1-streamlit-turquoise)](https://preferential-au-diffusion1.streamlit.app/) (basic code)
+
+## r2-r8: Domain size 200 nm x 100 nm, t in ns
 
 [![continuummodelnt2d](https://img.shields.io/badge/audiff2-streamlit-turquoise)](https://preferential-au-diffusion2.streamlit.app/) (basic code, geometry change of domain from square to rectangle)
 
@@ -18,7 +22,11 @@ Phase Field FFT Solver (Allen-Cahn, Cahn-Hilliard and Mechanics)
 
 [![continuummodelnt2d](https://img.shields.io/badge/audiff8-streamlit-red)](https://preferential-au-diffusion8.streamlit.app/) (c variable annotated properly within the calculation framework, customization of the visualizations, diffusion correction  and  simulation produced stable results , basic code, geometry change of domain from square to rectangle)
 
+## r9: Domain size 200 nm x 100 nm, t in s
+
 [![continuummodelnt2d](https://img.shields.io/badge/audiff8a-streamlit-red)](https://preferential-au-diffusion8a.streamlit.app/) (limiting the edges of colorscale bars, c variable annotated properly within the calculation framework, customization of the visualizations, diffusion correction  and  simulation produced stable results , basic code, geometry change of domain from square to rectangle)
+
+## r10: Domain size 500 nm x 250 nm, t in ns
 
 [![continuummodelnt2d](https://img.shields.io/badge/audiff9-streamlit-red)](https://preferential-au-diffusion9.streamlit.app/) (temporal features, limiting the edges of colorscale bars, c variable annotated properly within the calculation framework, customization of the visualizations, diffusion correction  and  simulation produced stable results , basic code, geometry change of domain from square to rectangle)
 
