@@ -47,9 +47,9 @@
 
 [![continuummodelnt2d](https://img.shields.io/badge/audiff13a-streamlit-orange)](https://preferential-au-diffusion13a.streamlit.app/) (figure customization, temporal features, limiting the edges of colorscale bars, c variable annotated properly within the calculation framework, customization of the visualizations, diffusion correction  and  simulation produced stable results , basic code, geometry change of domain from square to rectangle)
 
+## r14: Flexible domain size, t in s  ( enhanced version of r13a)
 
-
-
+[![continuummodelnt2d](https://img.shields.io/badge/audiff14-streamlit-violet)](https://preferential-au-diffusion14.streamlit.app/) (figure customization, temporal features, limiting the edges of colorscale bars, c variable annotated properly within the calculation framework, customization of the visualizations, diffusion correction  and  simulation produced stable results , basic code, geometry change of domain from square to rectangle)
 
 
 
