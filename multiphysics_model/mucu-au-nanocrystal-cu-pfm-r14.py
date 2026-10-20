@@ -1,7 +1,22 @@
 """
-Au-assisted Cu-Cu diffusion bonding simulator — rectangular MPF edition (v3.4.10)
+Au-assisted Cu-Cu diffusion bonding simulator — rectangular MPF edition (v3.4.11)
 ===============================================================================
 Physics: MPF + Fickian/Hart diffusion + Solute Drag + Elastoplasticity.
+
+v3.4.11 change (fix StreamlitValueBelowMinError):
+  * BUG FIX: Multiple figure-size widgets (the quick size control above
+    the Diagnostics figure, the enhanced panel, and the Visualization
+    Settings sub-tab) all share the same `fc['diagnostics_width']` /
+    `fc['diagnostics_height']` keys but had DIFFERENT min/max ranges.
+    When the user typed a value outside one widget's range, the value
+    got saved to the fc dict, then on the next Streamlit rerun, the OTHER
+    widget (with a different min/max) would crash with
+    `StreamlitValueBelowMinError` or `StreamlitValueAboveMaxError`.
+  * Fix: Added a `_clamped_number_input()` helper that clamps the value
+    to [min, max] BEFORE passing it to st.number_input. All size widgets
+    now use this helper, so they can never receive an out-of-range value.
+  * Applied to all size controls: multi_field, overlay, vector,
+    diagnostics, line_profile, and the enhanced panel's size_keys.
 
 v3.4.10 change (fix diagnostics width/height):
   * BUG FIX: The width/height controls in the Diagnostics figure
@@ -969,14 +984,15 @@ def render_inline_figure_customization(viz_cfg, *,
             w_key, h_key = size_keys
             c1, c2 = st.columns(2)
             with c1:
-                new_w = st.number_input(
-                    "Width (in)", value=float(fc.get(w_key, 11.0)),
+                # v3.4.11: clamped wrapper
+                new_w = _clamped_number_input(
+                    "Width (in)", value=fc.get(w_key, 11.0),
                     min_value=3.0, max_value=30.0, step=0.5,
                     key=f"{key_prefix}_w",
                     help="Figure width in inches. Press Enter or click outside to apply.")
             with c2:
-                new_h = st.number_input(
-                    "Height (in)", value=float(fc.get(h_key, 5.5)),
+                new_h = _clamped_number_input(
+                    "Height (in)", value=fc.get(h_key, 5.5),
                     min_value=2.0, max_value=30.0, step=0.5,
                     key=f"{key_prefix}_h")
             # v3.4.10: always write (fixes width/height not updating)
@@ -1187,6 +1203,36 @@ TICK_DIRECTIONS = ['out', 'in', 'inout']
 GRID_LINESTYLES = ['-', '--', ':', '-.', '']
 
 
+def _clamped_number_input(label, value, min_value, max_value, step=0.5,
+                            key=None, help=None, format=None):
+    """v3.4.11: st.number_input wrapper that clamps the value to
+    [min_value, max_value] before passing it. This prevents
+    StreamlitValueBelowMinError / StreamlitValueAboveMaxError when the
+    value was set by a different widget with a different min/max range
+    (e.g. the diagnostics_height is set by both the quick size control
+    with min=3 and the enhanced panel with min=3 — if the user types
+    2.5 in one widget, the other widget crashes on the next rerun)."""
+    if value is None:
+        value = min_value
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        value = float(min_value)
+    # Clamp to the widget's min/max range
+    if value < min_value:
+        value = float(min_value)
+    elif value > max_value:
+        value = float(max_value)
+    kwargs = dict(value=value, min_value=min_value, max_value=max_value, step=step)
+    if key is not None:
+        kwargs['key'] = key
+    if help is not None:
+        kwargs['help'] = help
+    if format is not None:
+        kwargs['format'] = format
+    return st.number_input(label, **kwargs)
+
+
 def render_enhanced_figure_customization(viz_cfg, *,
                                           size_keys=None,
                                           key_prefix='enh',
@@ -1219,13 +1265,14 @@ def render_enhanced_figure_customization(viz_cfg, *,
             st.markdown("**📐 Figure size (inches)**")
             c1, c2 = st.columns(2)
             with c1:
-                new_w = st.number_input(
-                    "Width", value=float(fc.get(w_key, 11.0)),
+                # v3.4.11: clamped wrapper prevents ValueBelowMin/AboveMax
+                new_w = _clamped_number_input(
+                    "Width", value=fc.get(w_key, 11.0),
                     min_value=3.0, max_value=30.0, step=0.5,
                     key=f"{key_prefix}_w")
             with c2:
-                new_h = st.number_input(
-                    "Height", value=float(fc.get(h_key, 5.5)),
+                new_h = _clamped_number_input(
+                    "Height", value=fc.get(h_key, 5.5),
                     min_value=2.0, max_value=30.0, step=0.5,
                     key=f"{key_prefix}_h")
             # v3.4.10: ALWAYS write — the conditional write was causing
@@ -4185,43 +4232,60 @@ def main():
                 c1, c2, c3 = st.columns(3)
                 with c1:
                     st.caption("**Multi-field grid**")
-                    mf_w = st.number_input("Width",  value=float(fc.get('multi_field_width', 13.5)),
+                    _mf_w = float(max(4.0, min(30.0, fc.get('multi_field_width', 13.5))))
+                    mf_w = st.number_input("Width",  value=_mf_w,
                                             min_value=4.0, max_value=30.0, step=0.5,
                                             key="fc_mf_w")
-                    mf_h = st.number_input("Height", value=float(fc.get('multi_field_height', 11.0)),
+                    _mf_h = float(max(3.0, min(30.0, fc.get('multi_field_height', 11.0))))
+                    mf_h = st.number_input("Height", value=_mf_h,
                                             min_value=3.0, max_value=30.0, step=0.5,
                                             key="fc_mf_h")
                 with c2:
                     st.caption("**Overlay / Vector**")
-                    ov_w = st.number_input("Width",  value=float(fc.get('overlay_width', 11.0)),
+                    _ov_w = float(max(4.0, min(30.0, fc.get('overlay_width', 11.0))))
+                    ov_w = st.number_input("Width",  value=_ov_w,
                                             min_value=4.0, max_value=30.0, step=0.5,
                                             key="fc_ov_w")
-                    ov_h = st.number_input("Height", value=float(fc.get('overlay_height', 5.5)),
+                    _ov_h = float(max(3.0, min(30.0, fc.get('overlay_height', 5.5))))
+                    ov_h = st.number_input("Height", value=_ov_h,
                                             min_value=3.0, max_value=30.0, step=0.5,
                                             key="fc_ov_h")
                 with c3:
                     st.caption("**Diagnostics**")
-                    dg_w = st.number_input("Width",  value=float(fc.get('diagnostics_width', 13.0)),
+                    # v3.4.11: clamp value to [min, max] before passing to
+                    # st.number_input to avoid StreamlitValueBelowMinError /
+                    # StreamlitValueAboveMaxError when the value was set by
+                    # a different widget (e.g. the quick size control above
+                    # the diagnostics figure, or the enhanced panel).
+                    _dg_w_raw = fc.get('diagnostics_width', 13.0)
+                    _dg_w = float(max(4.0, min(30.0, _dg_w_raw)))
+                    dg_w = st.number_input("Width",  value=_dg_w,
                                             min_value=4.0, max_value=30.0, step=0.5,
                                             key="fc_dg_w")
-                    dg_h = st.number_input("Height", value=float(fc.get('diagnostics_height', 8.0)),
+                    _dg_h_raw = fc.get('diagnostics_height', 8.0)
+                    _dg_h = float(max(3.0, min(30.0, _dg_h_raw)))
+                    dg_h = st.number_input("Height", value=_dg_h,
                                             min_value=3.0, max_value=30.0, step=0.5,
                                             key="fc_dg_h")
                 c1, c2 = st.columns(2)
                 with c1:
                     st.caption("**Line profile**")
-                    lp_w = st.number_input("Width",  value=float(fc.get('line_profile_width', 11.0)),
+                    _lp_w = float(max(4.0, min(30.0, fc.get('line_profile_width', 11.0))))
+                    lp_w = st.number_input("Width",  value=_lp_w,
                                             min_value=4.0, max_value=30.0, step=0.5,
                                             key="fc_lp_w")
-                    lp_h = st.number_input("Height", value=float(fc.get('line_profile_height', 4.5)),
+                    _lp_h = float(max(2.0, min(20.0, fc.get('line_profile_height', 4.5))))
+                    lp_h = st.number_input("Height", value=_lp_h,
                                             min_value=2.0, max_value=20.0, step=0.5,
                                             key="fc_lp_h")
                 with c2:
                     st.caption("**Vector overlay**")
-                    vc_w = st.number_input("Width",  value=float(fc.get('vector_width', 11.0)),
+                    _vc_w = float(max(4.0, min(30.0, fc.get('vector_width', 11.0))))
+                    vc_w = st.number_input("Width",  value=_vc_w,
                                             min_value=4.0, max_value=30.0, step=0.5,
                                             key="fc_vc_w")
-                    vc_h = st.number_input("Height", value=float(fc.get('vector_height', 5.5)),
+                    _vc_h = float(max(3.0, min(20.0, fc.get('vector_height', 5.5))))
+                    vc_h = st.number_input("Height", value=_vc_h,
                                             min_value=3.0, max_value=20.0, step=0.5,
                                             key="fc_vc_h")
 
@@ -4531,24 +4595,24 @@ def main():
                 st.markdown("**📐 Diagnostics figure size**")
                 c1, c2, c3 = st.columns([1, 1, 2])
                 with c1:
-                    fc_diag['diagnostics_width'] = st.number_input(
-                        "Width (in)", value=float(fc_diag.get('diagnostics_width', 13.0)),
+                    # v3.4.11: use clamped wrapper to avoid ValueBelowMin/AboveMax
+                    fc_diag['diagnostics_width'] = _clamped_number_input(
+                        "Width (in)", value=fc_diag.get('diagnostics_width', 13.0),
                         min_value=4.0, max_value=30.0, step=0.5,
                         key="diag_quick_w",
                         help="Width of the 2×2 diagnostics figure in inches.")
                 with c2:
-                    fc_diag['diagnostics_height'] = st.number_input(
-                        "Height (in)", value=float(fc_diag.get('diagnostics_height', 8.0)),
+                    fc_diag['diagnostics_height'] = _clamped_number_input(
+                        "Height (in)", value=fc_diag.get('diagnostics_height', 8.0),
                         min_value=3.0, max_value=30.0, step=0.5,
                         key="diag_quick_h",
                         help="Height of the 2×2 diagnostics figure in inches.")
                 with c3:
+                    _cur_w = float(fc_diag.get('diagnostics_width', 13.0))
+                    _cur_h = float(fc_diag.get('diagnostics_height', 8.0))
                     st.caption(
-                        f"Current: {fc_diag.get('diagnostics_width', 13.0):.1f} × "
-                        f"{fc_diag.get('diagnostics_height', 8.0):.1f} in → "
-                        f"each subplot ≈ "
-                        f"{fc_diag.get('diagnostics_width', 13.0)/2:.1f} × "
-                        f"{fc_diag.get('diagnostics_height', 8.0)/2:.1f} in. "
+                        f"Current: {_cur_w:.1f} × {_cur_h:.1f} in → "
+                        f"each subplot ≈ {_cur_w/2:.1f} × {_cur_h/2:.1f} in. "
                         f"For 2×2 grid, try **14×10** or **16×12** for "
                         f"less compression.")
                 # v3.4.9: enhanced customization for diagnostics 2D line plots
