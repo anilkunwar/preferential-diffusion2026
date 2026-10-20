@@ -1,7 +1,39 @@
 """
-Au-assisted Cu-Cu diffusion bonding simulator — rectangular MPF edition (v3.4.8)
+Au-assisted Cu-Cu diffusion bonding simulator — rectangular MPF edition (v3.4.9)
 ===============================================================================
 Physics: MPF + Fickian/Hart diffusion + Solute Drag + Elastoplasticity.
+
+v3.4.9 change (enhanced figure customization + LIVE colormaps):
+  * NEW: `render_enhanced_figure_customization()` — full per-figure
+    control panel with these new controls:
+    - Font sizes (Title, Labels, Ticks, Legend) — set to 0 = use theme default
+    - Line styles (- -- -. :), separate for main and minor series
+    - Marker styles (none, o, s, ^, v, D, +, x, *), separate for main/minor
+    - Marker size and edge width
+    - Per-series color pickers (5 series: Poly-Cu, nc-Cu, Avg, Max, Mass)
+    - Legend: show/hide, position (11 options incl. outside), frame on/off,
+      frame alpha
+    - Grid: show/alpha/style (- -- : -.)/color
+    - Spines (box): per-spine visibility (top/right/left/bottom) + width
+    - Tick: direction (out/in/inout), width, length
+    - Text overrides (title/xlabel/ylabel), figure size, axis limits,
+      colorbar show/orientation
+  * NEW: `render_live_colormap_picker()` — picks a colormap for EACH of
+    the 13 fields directly inline. NO Save button needed — the cmap is
+    applied immediately on the next render. This fixes the previous
+    "cmap not working" issue where the user had to click "Save field
+    settings" in the Visualization Settings tab.
+  * NEW: `apply_legend_styling()` helper — re-applies legend with new
+    position/frame/font-size settings after all plot() calls.
+  * UPGRADED: Diagnostics 4-panel 2D line plots now honor ALL the new
+    settings — line style, marker style, per-series colors, font sizes,
+    legend position, grid style, spine visibility.
+  * UPGRADED: Single-frame line profile now uses line_style, marker_style,
+    and per-series color from the customization config.
+  * Results tab (Multi-field grid mode) now shows BOTH:
+    1. Live per-field colormap picker (no Save button)
+    2. Enhanced per-figure customization panel
+    Each in its own collapsible expander.
 
 v3.4.8 change (auto-rebuild geometry):
   * The geometry (Voronoi grain map, Au film, nc-Cu seeds, eta fields) now
@@ -655,13 +687,31 @@ def default_figure_customization():
         'contour_line_width':    1.0,
         'quiver_width':          0.0025,
         'quiver_scale':          30.0,
+        # v3.4.9: line style & marker style (for 2D line plots)
+        'line_style':            '-',       # '-', '--', '-.', ':', 'none'
+        'line_style_minor':      '--',      # for the "minor" series (e.g. c_top dashed)
+        'marker_style':          'none',    # 'none', 'o', 's', '^', 'v', 'D', '+', 'x', '*'
+        'marker_style_minor':    'none',
+        # v3.4.9: per-series colors for diagnostics (Poly-Cu, nc-Cu, Avg/Max, Mass)
+        'color_series_1':        '#1f77b4',  # Poly-Cu (blue)
+        'color_series_2':        '#d62728',  # nc-Cu (red)
+        'color_series_3':        '#2ca02c',  # Avg stress (green)
+        'color_series_4':        '#2ca02c',  # Max stress (green, dashed)
+        'color_series_5':        '#000000',  # Au mass (black)
         # --- Text overrides (empty string → use default) ---
         'title_override':       '',
         'xlabel_override':      '',
         'ylabel_override':      '',
+        # v3.4.9: font size overrides (None = use rcParams default)
+        'title_font_size':      None,
+        'label_font_size':      None,
+        'tick_font_size':       None,
+        'legend_font_size':     None,
         # --- Grid ---
         'show_grid':            True,
         'grid_alpha':           0.3,
+        'grid_linestyle':       '-',       # '-', '--', ':', '-.'
+        'grid_color':           '#cccccc',
         # --- Axis limits (None means auto) ---
         'xlim':                 (None, None),
         'ylim':                 (None, None),
@@ -673,6 +723,16 @@ def default_figure_customization():
         'tick_direction':       'out',
         'tick_width':           1.0,
         'tick_length':          4,
+        # v3.4.9: per-spine visibility (box on/off)
+        'spine_top':            True,
+        'spine_right':          True,
+        'spine_left':           True,
+        'spine_bottom':         True,
+        # --- Legend (for 2D line plots) ---
+        'show_legend':          True,
+        'legend_position':      'best',  # 'best', 'upper right', 'lower left', etc.
+        'legend_frameon':       True,
+        'legend_framealpha':    1.0,
         # --- Misc ---
         'axis_equal':           True,
         'tight_layout':         True,
@@ -756,6 +816,12 @@ def apply_axis_styling(ax, fig_cfg, *, title=None, xlabel=None, ylabel=None,
     """
     if fig_cfg is None or ax is None:
         return
+    # v3.4.9: font size resolution — caller's explicit fs wins, else fig_cfg
+    if title_fs is None:
+        title_fs = fig_cfg.get('title_font_size')
+    if label_fs is None:
+        label_fs = fig_cfg.get('label_font_size')
+    tick_fs = fig_cfg.get('tick_font_size')
     # Text overrides
     if title is not None:
         override = fig_cfg.get('title_override', '').strip()
@@ -769,10 +835,17 @@ def apply_axis_styling(ax, fig_cfg, *, title=None, xlabel=None, ylabel=None,
         override = fig_cfg.get('ylabel_override', '').strip()
         ax.set_ylabel(override if override else ylabel,
                       fontsize=label_fs)
-    # Grid
+    # v3.4.9: apply tick font size
+    if tick_fs is not None:
+        for label_artist in ax.get_xticklabels() + ax.get_yticklabels():
+            label_artist.set_fontsize(float(tick_fs))
+    # Grid (v3.4.9: with style + color)
     target = grid_axes if grid_axes is not None else ax
     if fig_cfg.get('show_grid', True):
-        target.grid(True, alpha=float(fig_cfg.get('grid_alpha', 0.3)))
+        target.grid(True,
+                    alpha=float(fig_cfg.get('grid_alpha', 0.3)),
+                    linestyle=fig_cfg.get('grid_linestyle', '-'),
+                    color=fig_cfg.get('grid_color', '#cccccc'))
     else:
         target.grid(False)
     # Axis limits
@@ -782,10 +855,17 @@ def apply_axis_styling(ax, fig_cfg, *, title=None, xlabel=None, ylabel=None,
         ax.set_xlim(left=xlim[0], right=xlim[1])
     if ylim and (ylim[0] is not None or ylim[1] is not None):
         ax.set_ylim(bottom=ylim[0], top=ylim[1])
-    # Spines & ticks
+    # Spines & ticks (v3.4.9: per-spine visibility)
     sw = float(fig_cfg.get('spine_width', 1.0))
-    for s in ax.spines.values():
-        s.set_linewidth(sw)
+    spine_visible = {
+        'top':    fig_cfg.get('spine_top',    True),
+        'right':  fig_cfg.get('spine_right',  True),
+        'left':   fig_cfg.get('spine_left',   True),
+        'bottom': fig_cfg.get('spine_bottom', True),
+    }
+    for spine_name, spine in ax.spines.items():
+        spine.set_linewidth(sw)
+        spine.set_visible(spine_visible.get(spine_name, True))
     ax.tick_params(width=float(fig_cfg.get('tick_width', 1.0)),
                    length=float(fig_cfg.get('tick_length', 4)),
                    direction=fig_cfg.get('tick_direction', 'out'))
@@ -794,6 +874,33 @@ def apply_axis_styling(ax, fig_cfg, *, title=None, xlabel=None, ylabel=None,
             ax.set_aspect('equal')
         except Exception:
             pass
+
+
+def apply_legend_styling(ax, fig_cfg):
+    """v3.4.9: Apply legend customization (show/position/frame/font-size)
+    to an Axes that already has labels. Call this AFTER all plot() calls."""
+    if fig_cfg is None or ax is None:
+        return
+    if not fig_cfg.get('show_legend', True):
+        legend = ax.get_legend()
+        if legend is not None:
+            legend.remove()
+        return
+    leg_pos = fig_cfg.get('legend_position', 'best')
+    legend_fs = fig_cfg.get('legend_font_size')
+    frameon = bool(fig_cfg.get('legend_frameon', True))
+    framealpha = float(fig_cfg.get('legend_framealpha', 1.0))
+    # Recreate legend with new settings
+    handles, labels = ax.get_legend_handles_labels()
+    if not handles:
+        return
+    legend = ax.legend(
+        handles, labels,
+        loc=leg_pos,
+        frameon=frameon,
+        framealpha=framealpha,
+        fontsize=legend_fs)
+    return legend
 
 
 # ============================================================================
@@ -1030,6 +1137,430 @@ def render_inline_figure_customization(viz_cfg, *,
             st.caption("Tweak any value — changes apply on next figure render.")
 
     return changed
+
+
+# ============================================================================
+# v3.4.9: ENHANCED INLINE FIGURE CUSTOMIZATION (2D line plots)
+# ============================================================================
+# Full per-figure control panel for the Results tab and Diagnostics plots.
+# Includes: figure size, font sizes (title/label/tick/legend), line style
+# (- -- -. :), marker style (o s ^ D x + *), per-series colors, legend
+# show/position/frame, grid style+color, per-spine visibility, axis limits,
+# text overrides, colorbar, ticks.
+#
+# Usage:
+#     render_enhanced_figure_customization(
+#         viz_cfg,
+#         size_keys=('diagnostics_width', 'diagnostics_height'),
+#         key_prefix='diag',
+#         show_line_styles=True,   # show line/marker style controls
+#         show_series_colors=True, # show per-series color pickers
+#         show_legend=True,        # show legend controls
+#         show_spines=True,        # show spine visibility controls
+#         show_font_sizes=True,   # show font-size controls
+#         show_colorbar=False,    # show colorbar controls (off for line plots)
+#         n_series=5,              # number of per-series color pickers
+#     )
+
+LINE_STYLES = ['-', '--', '-.', ':', 'none', '']
+MARKER_STYLES = ['none', 'o', 's', '^', 'v', '<', '>', 'D', 'd', '+', 'x', '*', '.', ',', '1', '2', '3', '4', '_']
+LEGEND_POSITIONS = ['best', 'upper right', 'upper left', 'lower right', 'lower left',
+                   'center', 'center left', 'center right', 'upper center', 'lower center',
+                   'outside upper', 'outside right']
+TICK_DIRECTIONS = ['out', 'in', 'inout']
+GRID_LINESTYLES = ['-', '--', ':', '-.', '']
+
+
+def render_enhanced_figure_customization(viz_cfg, *,
+                                          size_keys=None,
+                                          key_prefix='enh',
+                                          show_line_styles=True,
+                                          show_series_colors=False,
+                                          show_legend=True,
+                                          show_spines=True,
+                                          show_font_sizes=True,
+                                          show_colorbar=True,
+                                          show_axis_limits=True,
+                                          show_text_overrides=True,
+                                          show_grid=True,
+                                          n_series=5,
+                                          label='Figure customization'):
+    """v3.4.9: Enhanced inline panel with full control over 2D line plots
+    and image plots. Writes live to viz_cfg['figure_customization']."""
+    fc = viz_cfg.setdefault('figure_customization', default_figure_customization())
+    default_expanded = bool(st.session_state.get(f'{key_prefix}_exp', False))
+
+    with st.expander(f"🎨 {label}", expanded=default_expanded):
+        # Keep-open toggle
+        st.session_state[f'{key_prefix}_exp'] = st.checkbox(
+            "Keep expanded", value=default_expanded,
+            key=f"{key_prefix}_keep_exp",
+            help="If checked, this panel stays open across reruns.")
+
+        # ---------- Figure size ----------
+        if size_keys is not None and len(size_keys) == 2:
+            w_key, h_key = size_keys
+            st.markdown("**📐 Figure size (inches)**")
+            c1, c2 = st.columns(2)
+            with c1:
+                new_w = st.number_input(
+                    "Width", value=float(fc.get(w_key, 11.0)),
+                    min_value=3.0, max_value=30.0, step=0.5,
+                    key=f"{key_prefix}_w")
+            with c2:
+                new_h = st.number_input(
+                    "Height", value=float(fc.get(h_key, 5.5)),
+                    min_value=2.0, max_value=30.0, step=0.5,
+                    key=f"{key_prefix}_h")
+            if new_w != float(fc.get(w_key, 11.0)):
+                fc[w_key] = new_w
+            if new_h != float(fc.get(h_key, 5.5)):
+                fc[h_key] = new_h
+
+        # ---------- Font sizes ----------
+        if show_font_sizes:
+            st.markdown("**🔤 Font sizes** (blank = theme default)")
+            c1, c2, c3, c4 = st.columns(4)
+            with c1:
+                cur = fc.get('title_font_size')
+                new_tfs = st.number_input(
+                    "Title", value=float(cur) if cur is not None else 0.0,
+                    min_value=0.0, max_value=30.0, step=0.5,
+                    key=f"{key_prefix}_tfs",
+                    help="0 = use theme default")
+                fc['title_font_size'] = float(new_tfs) if (new_tfs is not None and new_tfs > 0) else None
+            with c2:
+                cur = fc.get('label_font_size')
+                new_lfs = st.number_input(
+                    "Labels", value=float(cur) if cur is not None else 0.0,
+                    min_value=0.0, max_value=24.0, step=0.5,
+                    key=f"{key_prefix}_lfs",
+                    help="0 = use theme default")
+                fc['label_font_size'] = float(new_lfs) if (new_lfs is not None and new_lfs > 0) else None
+            with c3:
+                cur = fc.get('tick_font_size')
+                new_tkfs = st.number_input(
+                    "Ticks", value=float(cur) if cur is not None else 0.0,
+                    min_value=0.0, max_value=20.0, step=0.5,
+                    key=f"{key_prefix}_tkfs",
+                    help="0 = use theme default")
+                fc['tick_font_size'] = float(new_tkfs) if (new_tkfs is not None and new_tkfs > 0) else None
+            with c4:
+                cur = fc.get('legend_font_size')
+                new_lgfs = st.number_input(
+                    "Legend", value=float(cur) if cur is not None else 0.0,
+                    min_value=0.0, max_value=20.0, step=0.5,
+                    key=f"{key_prefix}_lgfs",
+                    help="0 = use theme default")
+                fc['legend_font_size'] = float(new_lgfs) if (new_lgfs is not None and new_lgfs > 0) else None
+
+        # ---------- Text overrides ----------
+        if show_text_overrides:
+            st.markdown("**🏷️ Text overrides** (blank = default)")
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                fc['title_override'] = st.text_input(
+                    "Title", value=fc.get('title_override', ''),
+                    key=f"{key_prefix}_ti", placeholder="Title override")
+            with c2:
+                fc['xlabel_override'] = st.text_input(
+                    "X label", value=fc.get('xlabel_override', ''),
+                    key=f"{key_prefix}_xl", placeholder="X-axis label")
+            with c3:
+                fc['ylabel_override'] = st.text_input(
+                    "Y label", value=fc.get('ylabel_override', ''),
+                    key=f"{key_prefix}_yl", placeholder="Y-axis label")
+
+        # ---------- Line styles & markers ----------
+        if show_line_styles:
+            st.markdown("**✏️ Line styles & markers**")
+            c1, c2, c3, c4 = st.columns(4)
+            with c1:
+                ls_idx = LINE_STYLES.index(fc.get('line_style', '-')) \
+                    if fc.get('line_style', '-') in LINE_STYLES else 0
+                fc['line_style'] = st.selectbox(
+                    "Line style (main)", LINE_STYLES, index=ls_idx,
+                    key=f"{key_prefix}_ls",
+                    format_func=lambda x: {'-': '— solid', '--': '–– dashed',
+                                             '-.': '–· dash-dot', ':': '·· dotted',
+                                             'none': 'none', '': 'none'}.get(x, x))
+            with c2:
+                lsm_idx = LINE_STYLES.index(fc.get('line_style_minor', '--')) \
+                    if fc.get('line_style_minor', '--') in LINE_STYLES else 1
+                fc['line_style_minor'] = st.selectbox(
+                    "Line style (minor)", LINE_STYLES, index=lsm_idx,
+                    key=f"{key_prefix}_lsm",
+                    format_func=lambda x: {'-': '— solid', '--': '–– dashed',
+                                             '-.': '–· dash-dot', ':': '·· dotted',
+                                             'none': 'none', '': 'none'}.get(x, x))
+            with c3:
+                ms_idx = MARKER_STYLES.index(fc.get('marker_style', 'none')) \
+                    if fc.get('marker_style', 'none') in MARKER_STYLES else 0
+                fc['marker_style'] = st.selectbox(
+                    "Marker (main)", MARKER_STYLES, index=ms_idx,
+                    key=f"{key_prefix}_ms")
+            with c4:
+                msm_idx = MARKER_STYLES.index(fc.get('marker_style_minor', 'none')) \
+                    if fc.get('marker_style_minor', 'none') in MARKER_STYLES else 0
+                fc['marker_style_minor'] = st.selectbox(
+                    "Marker (minor)", MARKER_STYLES, index=msm_idx,
+                    key=f"{key_prefix}_msm")
+            c1, c2, c3, c4 = st.columns(4)
+            with c1:
+                fc['line_width'] = st.number_input(
+                    "Line width (main)", value=float(fc.get('line_width', 2.0)),
+                    min_value=0.2, max_value=10.0, step=0.1,
+                    key=f"{key_prefix}_lw")
+            with c2:
+                fc['line_width_minor'] = st.number_input(
+                    "Line width (minor)", value=float(fc.get('line_width_minor', 1.5)),
+                    min_value=0.1, max_value=8.0, step=0.1,
+                    key=f"{key_prefix}_lwm")
+            with c3:
+                _ms_val = fc.get('marker_size', 6)
+                try:
+                    _ms_val = int(_ms_val) if _ms_val is not None else 6
+                except (TypeError, ValueError):
+                    _ms_val = 6
+                fc['marker_size'] = st.number_input(
+                    "Marker size", value=_ms_val,
+                    min_value=0, max_value=30, step=1,
+                    key=f"{key_prefix}_msz")
+            with c4:
+                fc['marker_width'] = st.number_input(
+                    "Marker edge w", value=float(fc.get('marker_width', 1.0)),
+                    min_value=0.1, max_value=5.0, step=0.1,
+                    key=f"{key_prefix}_mew")
+
+        # ---------- Per-series colors ----------
+        if show_series_colors:
+            st.markdown("**🎨 Per-series colors** (Poly-Cu, nc-Cu, Avg, Max, Mass)")
+            cols = st.columns(min(n_series, 5))
+            for i in range(min(n_series, 5)):
+                with cols[i]:
+                    fc[f'color_series_{i+1}'] = st.color_picker(
+                        f"Series {i+1}", value=fc.get(f'color_series_{i+1}', '#1f77b4'),
+                        key=f"{key_prefix}_cs{i+1}")
+
+        # ---------- Legend ----------
+        if show_legend:
+            st.markdown("**📋 Legend**")
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                fc['show_legend'] = st.checkbox(
+                    "Show legend", value=bool(fc.get('show_legend', True)),
+                    key=f"{key_prefix}_sleg")
+            with c2:
+                leg_idx = LEGEND_POSITIONS.index(fc.get('legend_position', 'best')) \
+                    if fc.get('legend_position', 'best') in LEGEND_POSITIONS else 0
+                fc['legend_position'] = st.selectbox(
+                    "Position", LEGEND_POSITIONS, index=leg_idx,
+                    key=f"{key_prefix}_legpos")
+            with c3:
+                fc['legend_frameon'] = st.checkbox(
+                    "Frame", value=bool(fc.get('legend_frameon', True)),
+                    key=f"{key_prefix}_legf")
+            c1, c2 = st.columns(2)
+            with c1:
+                fc['legend_framealpha'] = st.slider(
+                    "Frame α", 0.0, 1.0,
+                    float(fc.get('legend_framealpha', 1.0)),
+                    0.05, key=f"{key_prefix}_legfa")
+
+        # ---------- Grid ----------
+        if show_grid:
+            st.markdown("**📊 Grid**")
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                fc['show_grid'] = st.checkbox(
+                    "Show grid", value=bool(fc.get('show_grid', True)),
+                    key=f"{key_prefix}_grid")
+            with c2:
+                fc['grid_alpha'] = st.slider(
+                    "Grid α", 0.0, 1.0,
+                    float(fc.get('grid_alpha', 0.3)),
+                    0.05, key=f"{key_prefix}_ga")
+            with c3:
+                gls_idx = GRID_LINESTYLES.index(fc.get('grid_linestyle', '-')) \
+                    if fc.get('grid_linestyle', '-') in GRID_LINESTYLES else 0
+                fc['grid_linestyle'] = st.selectbox(
+                    "Grid style", GRID_LINESTYLES, index=gls_idx,
+                    key=f"{key_prefix}_gls",
+                    format_func=lambda x: {'-': '— solid', '--': '–– dashed',
+                                             ':': '·· dotted', '-.': '–· dash-dot',
+                                             '': 'none'}.get(x, x))
+            fc['grid_color'] = st.color_picker(
+                "Grid color", value=fc.get('grid_color', '#cccccc'),
+                key=f"{key_prefix}_gcol")
+
+        # ---------- Axis limits ----------
+        if show_axis_limits:
+            st.markdown("**📏 Axis limits** (blank = auto)")
+            xlim_cur = fc.get('xlim', (None, None))
+            ylim_cur = fc.get('ylim', (None, None))
+            c1, c2, c3, c4 = st.columns(4)
+            with c1:
+                xmin_in = st.text_input(
+                    "xmin", value='' if xlim_cur[0] is None else str(xlim_cur[0]),
+                    key=f"{key_prefix}_xmin")
+            with c2:
+                xmax_in = st.text_input(
+                    "xmax", value='' if xlim_cur[1] is None else str(xlim_cur[1]),
+                    key=f"{key_prefix}_xmax")
+            with c3:
+                ymin_in = st.text_input(
+                    "ymin", value='' if ylim_cur[0] is None else str(ylim_cur[0]),
+                    key=f"{key_prefix}_ymin")
+            with c4:
+                ymax_in = st.text_input(
+                    "ymax", value='' if ylim_cur[1] is None else str(ylim_cur[1]),
+                    key=f"{key_prefix}_ymax")
+            def _parse(s):
+                s = s.strip() if isinstance(s, str) else s
+                if s is None or s == '':
+                    return None
+                try:
+                    return float(s)
+                except Exception:
+                    return None
+            fc['xlim'] = (_parse(xmin_in), _parse(xmax_in))
+            fc['ylim'] = (_parse(ymin_in), _parse(ymax_in))
+
+        # ---------- Colorbar ----------
+        if show_colorbar:
+            st.markdown("**.colorbar**")
+            c1, c2 = st.columns(2)
+            with c1:
+                fc['show_colorbar'] = st.checkbox(
+                    "Show colorbar", value=bool(fc.get('show_colorbar', True)),
+                    key=f"{key_prefix}_cb")
+            with c2:
+                cb_o_idx = 0 if fc.get('colorbar_orientation', 'vertical') == 'vertical' else 1
+                fc['colorbar_orientation'] = st.selectbox(
+                    "Colorbar orient.", ['vertical', 'horizontal'],
+                    index=cb_o_idx, key=f"{key_prefix}_cbo")
+
+        # ---------- Spines (box) ----------
+        if show_spines:
+            st.markdown("**▦ Spines (box)**")
+            c1, c2, c3, c4, c5 = st.columns(5)
+            with c1:
+                fc['spine_top'] = st.checkbox(
+                    "Top", value=bool(fc.get('spine_top', True)),
+                    key=f"{key_prefix}_spt")
+            with c2:
+                fc['spine_right'] = st.checkbox(
+                    "Right", value=bool(fc.get('spine_right', True)),
+                    key=f"{key_prefix}_spr")
+            with c3:
+                fc['spine_left'] = st.checkbox(
+                    "Left", value=bool(fc.get('spine_left', True)),
+                    key=f"{key_prefix}_spl")
+            with c4:
+                fc['spine_bottom'] = st.checkbox(
+                    "Bottom", value=bool(fc.get('spine_bottom', True)),
+                    key=f"{key_prefix}_spb")
+            with c5:
+                fc['spine_width'] = st.number_input(
+                    "Width", value=float(fc.get('spine_width', 1.0)),
+                    min_value=0.1, max_value=5.0, step=0.1,
+                    key=f"{key_prefix}_sw")
+
+        # ---------- Ticks ----------
+        st.markdown("**⏱️ Ticks**")
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            td_idx = TICK_DIRECTIONS.index(fc.get('tick_direction', 'out')) \
+                if fc.get('tick_direction', 'out') in TICK_DIRECTIONS else 0
+            fc['tick_direction'] = st.selectbox(
+                "Direction", TICK_DIRECTIONS, index=td_idx,
+                key=f"{key_prefix}_td")
+        with c2:
+            fc['tick_width'] = st.number_input(
+                "Width", value=float(fc.get('tick_width', 1.0)),
+                min_value=0.1, max_value=5.0, step=0.1,
+                key=f"{key_prefix}_tw")
+        with c3:
+            _tl_val = fc.get('tick_length', 4)
+            try:
+                _tl_val = int(_tl_val) if _tl_val is not None else 4
+            except (TypeError, ValueError):
+                _tl_val = 4
+            fc['tick_length'] = st.number_input(
+                "Length", value=_tl_val,
+                min_value=0, max_value=20, step=1,
+                key=f"{key_prefix}_tl")
+
+        st.caption("✏️ All changes apply live — no Save button needed.")
+
+    return True
+
+
+def render_live_colormap_picker(viz_cfg, *, key_prefix='cmap',
+                                  label='Per-field colormap (live)'):
+    """v3.4.9: Compact LIVE per-field colormap picker — no Save button.
+    Writes directly to viz_cfg['field_settings'][fname]['cmap'] so the
+    next figure render uses the new cmap."""
+    field_keys = list(FIELD_DEFAULT_CMAPS.keys())
+    cmap_options = ColormapRegistry.list_all()
+    fc = viz_cfg.setdefault('field_settings',
+                              {f: {'auto': True, 'vmin': None, 'vmax': None,
+                                   'log': False, 'invert': False,
+                                   'cmap': FIELD_DEFAULT_CMAPS.get(f, 'viridis')}
+                               for f in field_keys})
+    default_expanded = bool(st.session_state.get(f'{key_prefix}_exp', False))
+    with st.expander(f"🎨 {label}", expanded=default_expanded):
+        st.session_state[f'{key_prefix}_exp'] = st.checkbox(
+            "Keep expanded", value=default_expanded,
+            key=f"{key_prefix}_keep_exp",
+            help="If checked, this panel stays open across reruns.")
+        st.caption(
+            f"Pick a colormap for each of the {len(field_keys)} fields. "
+            f"Changes apply LIVE on the next render — no Save button needed. "
+            f"Use the **Invert** checkbox to reverse any colormap.")
+        # Show all fields in a 2-column layout
+        for i in range(0, len(field_keys), 2):
+            c1, c2 = st.columns(2)
+            for j, col in enumerate([c1, c2]):
+                if i + j < len(field_keys):
+                    with col:
+                        fname = field_keys[i + j]
+                        fset = fc.setdefault(fname, {})
+                        cur_cmap = fset.get('cmap',
+                                              FIELD_DEFAULT_CMAPS.get(fname, 'viridis'))
+                        cmap_idx = (cmap_options.index(cur_cmap)
+                                     if cur_cmap in cmap_options else 0)
+                        new_cmap = st.selectbox(
+                            f"{fname}",
+                            cmap_options,
+                            index=cmap_idx,
+                            key=f"{key_prefix}_{fname}_cmap",
+                            format_func=lambda x: x,
+                            help=f"{len(cmap_options)} colormaps available")
+                        # Live update — no Save button
+                        if new_cmap != cur_cmap:
+                            fset['cmap'] = new_cmap
+                        invert = st.checkbox(
+                            f"Invert {fname}",
+                            value=bool(fset.get('invert', False)),
+                            key=f"{key_prefix}_{fname}_inv",
+                            help="Reverse the colormap")
+                        fset['invert'] = invert
+                        # Live preview swatch
+                        try:
+                            swatch_cmap = ColormapRegistry.resolve(new_cmap,
+                                                                     invert=invert)
+                            gradient = np.linspace(0, 1, 256).reshape(1, -1)
+                            fig_sw, ax_sw = plt.subplots(figsize=(3.5, 0.35),
+                                                          dpi=70)
+                            ax_sw.imshow(gradient, aspect='auto', cmap=swatch_cmap)
+                            ax_sw.set_axis_off()
+                            ax_sw.set_title(f"{fname} → {new_cmap}",
+                                             fontsize=8, pad=2)
+                            st.pyplot(fig_sw, clear_figure=True); plt.close(fig_sw)
+                        except Exception:
+                            pass
+    return True
 
 
 # ============================================================================
@@ -3883,30 +4414,56 @@ def main():
                     ["Multi-field grid", "Overlay", "Vector field"],
                     horizontal=True, key="res_mode")
 
-                # v3.4.6: inline figure customization per-mode
+                # v3.4.9: enhanced inline figure customization per-mode
+                # + LIVE per-field colormap picker for the Multi-field grid mode
                 if mode_res == "Multi-field grid":
-                    render_inline_figure_customization(
+                    # Live per-field colormap picker (no Save button needed)
+                    render_live_colormap_picker(
+                        viz_cfg, key_prefix='res_cmap',
+                        label='🎨 Per-field colormap (live, no Save)')
+                    render_enhanced_figure_customization(
                         viz_cfg,
                         size_keys=('multi_field_width', 'multi_field_height'),
                         key_prefix='res_mf',
-                        label='Multi-field grid customization',
-                        show_lines=False)
+                        label='🎨 Multi-field grid — full customization',
+                        show_line_styles=False,
+                        show_series_colors=False,
+                        show_legend=False,
+                        show_spines=True,
+                        show_font_sizes=True,
+                        show_colorbar=True,
+                        show_axis_limits=True,
+                        show_text_overrides=True,
+                        show_grid=True)
                 elif mode_res == "Overlay":
-                    render_inline_figure_customization(
+                    render_enhanced_figure_customization(
                         viz_cfg,
                         size_keys=('overlay_width', 'overlay_height'),
                         key_prefix='res_ov',
-                        label='Overlay customization',
-                        show_lines=True)
+                        label='🎨 Overlay — full customization',
+                        show_line_styles=True,
+                        show_series_colors=False,
+                        show_legend=True,
+                        show_spines=True,
+                        show_font_sizes=True,
+                        show_colorbar=True)
                 else:
-                    render_inline_figure_customization(
+                    render_enhanced_figure_customization(
                         viz_cfg,
                         size_keys=('vector_width', 'vector_height'),
                         key_prefix='res_vc',
-                        label='Vector field customization',
-                        show_lines=True)
+                        label='🎨 Vector field — full customization',
+                        show_line_styles=True,
+                        show_series_colors=False,
+                        show_legend=True,
+                        show_spines=True,
+                        show_font_sizes=True,
+                        show_colorbar=True)
                 # rebuild style dict so viz_cfg['figure_customization'] changes take effect
                 style['figure_customization'] = viz_cfg.get('figure_customization', {})
+                style['colormaps'] = {f: fset.get('cmap', FIELD_DEFAULT_CMAPS.get(f, 'viridis'))
+                                       for f, fset in viz_cfg['field_settings'].items()}
+                style['field_settings'] = viz_cfg['field_settings']
 
                 if mode_res == "Multi-field grid":
                     fig = vis.create_multi_field_comparison(history[idx], style)
@@ -3948,20 +4505,45 @@ def main():
                                     "and a valid source.")
 
                 st.subheader("Region-Averaged Diagnostics")
-                # v3.4.6: inline customization for diagnostics figure
-                render_inline_figure_customization(
+                # v3.4.9: enhanced customization for diagnostics 2D line plots
+                render_enhanced_figure_customization(
                     viz_cfg,
                     size_keys=('diagnostics_width', 'diagnostics_height'),
                     key_prefix='diag',
-                    label='Diagnostics figure customization',
-                    show_lines=True,
+                    label='🎨 Diagnostics — full 2D line customization',
+                    show_line_styles=True,
+                    show_series_colors=True,  # per-series colors for c_top/c_bot/Avg/Max/Mass
+                    show_legend=True,
+                    show_spines=True,
+                    show_font_sizes=True,
                     show_colorbar=False,
-                    show_axis_limits=False)
+                    show_axis_limits=False,
+                    show_text_overrides=True,
+                    show_grid=True,
+                    n_series=5)
                 t_disp, t_unit = fmt_time_range(solver.history['time'], params)
                 t = t_disp
                 fig_cfg = viz_cfg.get('figure_customization', {})
+                # v3.4.9: per-series line style/marker/color
                 lw_main = float(fig_cfg.get('line_width', 2.0))
                 lw_minor = float(fig_cfg.get('line_width_minor', 1.5))
+                ls_main = fig_cfg.get('line_style', '-')
+                ls_minor = fig_cfg.get('line_style_minor', '--')
+                ms_main = fig_cfg.get('marker_style', 'none')
+                ms_minor = fig_cfg.get('marker_style_minor', 'none')
+                marker_size = float(fig_cfg.get('marker_size', 6))
+                marker_ew = float(fig_cfg.get('marker_width', 1.0))
+                col1 = fig_cfg.get('color_series_1', '#1f77b4')  # Poly-Cu
+                col2 = fig_cfg.get('color_series_2', '#d62728')  # nc-Cu
+                col3 = fig_cfg.get('color_series_3', '#2ca02c')  # Avg
+                col4 = fig_cfg.get('color_series_4', '#2ca02c')  # Max
+                col5 = fig_cfg.get('color_series_5', '#000000')  # Mass
+                # matplotlib marker = '' means "no marker"
+                m_main = '' if ms_main in ('none', '') else ms_main
+                m_minor = '' if ms_minor in ('none', '') else ms_minor
+                # matplotlib linestyle = '' or 'none' means "no line"
+                l_main = '' if ls_main in ('none', '') else ls_main
+                l_minor = '' if ls_minor in ('none', '') else ls_minor
                 grid_alpha = float(fig_cfg.get('grid_alpha', 0.3))
                 show_grid = bool(fig_cfg.get('show_grid', True))
                 fig_w = float(fig_cfg.get('diagnostics_width', 13.0))
@@ -3969,52 +4551,67 @@ def main():
                 t_xlabel = fig_cfg.get('xlabel_override', '').strip() or f't ({t_unit})'
 
                 fig, axes = plt.subplots(2, 2, figsize=(fig_w, fig_h))
-                axes[0, 0].plot(t, solver.history['c_top'], 'b-', lw=lw_main,
-                                label='Poly-Cu (top)')
-                axes[0, 0].plot(t, solver.history['c_bot'], 'r-', lw=lw_main,
-                                label='nc-Cu (bottom)')
+                axes[0, 0].plot(t, solver.history['c_top'], color=col1,
+                                 linestyle=l_main, lw=lw_main, marker=m_main,
+                                 ms=marker_size, mew=marker_ew,
+                                 label='Poly-Cu (top)')
+                axes[0, 0].plot(t, solver.history['c_bot'], color=col2,
+                                 linestyle=l_main, lw=lw_main, marker=m_main,
+                                 ms=marker_size, mew=marker_ew,
+                                 label='nc-Cu (bottom)')
                 axes[0, 0].set_xlabel(t_xlabel)
                 axes[0, 0].set_ylabel('mean c (Au)')
                 axes[0, 0].set_title('Au concentration: Poly-Cu vs nc-Cu')
-                axes[0, 0].legend(); axes[0, 0].grid(show_grid, alpha=grid_alpha)
-                apply_axis_styling(axes[0, 0], fig_cfg)
+                apply_axis_styling(axes[0, 0], fig_cfg,
+                                    title='Au concentration: Poly-Cu vs nc-Cu',
+                                    xlabel=t_xlabel, ylabel='mean c (Au)')
+                apply_legend_styling(axes[0, 0], fig_cfg)
 
-                axes[0, 1].plot(t, solver.history['gb_top'], 'b-', lw=lw_main,
-                                label='Poly-Cu')
-                axes[0, 1].plot(t, solver.history['gb_bot'], 'r-', lw=lw_main,
-                                label='nc-Cu')
-                axes[0, 1].set_xlabel(t_xlabel)
-                axes[0, 1].set_ylabel('mean φ_gb')
-                axes[0, 1].set_title('GB density (Hart indicator)')
-                axes[0, 1].legend(); axes[0, 1].grid(show_grid, alpha=grid_alpha)
-                apply_axis_styling(axes[0, 1], fig_cfg)
+                axes[0, 1].plot(t, solver.history['gb_top'], color=col1,
+                                 linestyle=l_main, lw=lw_main, marker=m_main,
+                                 ms=marker_size, mew=marker_ew,
+                                 label='Poly-Cu')
+                axes[0, 1].plot(t, solver.history['gb_bot'], color=col2,
+                                 linestyle=l_main, lw=lw_main, marker=m_main,
+                                 ms=marker_size, mew=marker_ew,
+                                 label='nc-Cu')
+                apply_axis_styling(axes[0, 1], fig_cfg,
+                                    title='GB density (Hart indicator)',
+                                    xlabel=t_xlabel, ylabel='mean φ_gb')
+                apply_legend_styling(axes[0, 1], fig_cfg)
 
                 axes[1, 0].plot(t, np.array(solver.history['avg_stress'])/1e9,
-                                'g-', lw=lw_main, label='Avg')
+                                 color=col3, linestyle=l_main, lw=lw_main,
+                                 marker=m_main, ms=marker_size, mew=marker_ew,
+                                 label='Avg')
                 axes[1, 0].plot(t, np.array(solver.history['max_stress'])/1e9,
-                                'g--', lw=lw_minor, label='Max')
-                axes[1, 0].set_xlabel(t_xlabel)
-                axes[1, 0].set_ylabel('σ (GPa)')
-                axes[1, 0].set_title('Stress evolution')
-                axes[1, 0].legend(); axes[1, 0].grid(show_grid, alpha=grid_alpha)
-                apply_axis_styling(axes[1, 0], fig_cfg)
+                                 color=col4, linestyle=l_minor, lw=lw_minor,
+                                 marker=m_minor, ms=marker_size, mew=marker_ew,
+                                 label='Max')
+                apply_axis_styling(axes[1, 0], fig_cfg,
+                                    title='Stress evolution',
+                                    xlabel=t_xlabel, ylabel='σ (GPa)')
+                apply_legend_styling(axes[1, 0], fig_cfg)
 
                 au_mass = np.array(solver.history['au_mass'])
-                axes[1, 1].plot(t, au_mass / max(au_mass[0], 1e-12), 'k-',
-                                lw=lw_main, label='Au mass / initial')
+                axes[1, 1].plot(t, au_mass / max(au_mass[0], 1e-12),
+                                 color=col5, linestyle=l_main, lw=lw_main,
+                                 marker=m_main, ms=marker_size, mew=marker_ew,
+                                 label='Au mass / initial')
                 c_top_arr = np.array(solver.history['c_top'])
                 c_bot_arr = np.array(solver.history['c_bot'])
                 ax2 = axes[1, 1].twinx()
-                ax2.plot(t, c_top_arr, 'b--', lw=lw_minor, label='c_top')
-                ax2.plot(t, c_bot_arr, 'r--', lw=lw_minor, label='c_bot')
+                ax2.plot(t, c_top_arr, color=col1, linestyle=l_minor,
+                          lw=lw_minor, marker=m_minor, ms=marker_size,
+                          mew=marker_ew, label='c_top')
+                ax2.plot(t, c_bot_arr, color=col2, linestyle=l_minor,
+                          lw=lw_minor, marker=m_minor, ms=marker_size,
+                          mew=marker_ew, label='c_bot')
                 ax2.set_ylabel('mean c')
-                axes[1, 1].set_xlabel(t_xlabel)
-                axes[1, 1].set_ylabel('mass ratio')
-                axes[1, 1].set_title('Mass conservation (guarded)')
-                axes[1, 1].legend(loc='upper left')
-                ax2.legend(loc='upper right')
-                axes[1, 1].grid(show_grid, alpha=grid_alpha)
-                apply_axis_styling(axes[1, 1], fig_cfg)
+                apply_axis_styling(axes[1, 1], fig_cfg,
+                                    title='Mass conservation (guarded)',
+                                    xlabel=t_xlabel, ylabel='mass ratio')
+                apply_legend_styling(axes[1, 1], fig_cfg)
 
                 plt.tight_layout()
                 st.pyplot(fig); plt.close(fig)
@@ -4027,14 +4624,21 @@ def main():
                 history = st.session_state.history
                 profiler = EnhancedLineProfiler(Nx, Ny, dx, dy)
 
-                # v3.4.6: inline customization for line-profile figures
-                render_inline_figure_customization(
+                # v3.4.9: enhanced customization for line-profile figures
+                render_enhanced_figure_customization(
                     viz_cfg,
                     size_keys=('line_profile_width', 'line_profile_height'),
                     key_prefix='lp',
-                    label='Line profile figure customization',
-                    show_lines=True,
-                    show_colorbar=False)
+                    label='🎨 Line profile — full customization',
+                    show_line_styles=True,
+                    show_series_colors=False,
+                    show_legend=True,
+                    show_spines=True,
+                    show_font_sizes=True,
+                    show_colorbar=False,
+                    show_axis_limits=True,
+                    show_text_overrides=True,
+                    show_grid=True)
 
                 sub_a, sub_b = st.tabs(["Single frame", "Multi-time compare"])
 
@@ -4063,17 +4667,22 @@ def main():
                             fig_w = float(fc.get('line_profile_width', 11.0))
                             fig_h = float(fc.get('line_profile_height', 4.0))
                             fig, ax = plt.subplots(figsize=(fig_w, fig_h))
-                            ax.plot(dist, prof, 'b-',
+                            # v3.4.9: honor line_style + marker_style + series color
+                            ls_main = fc.get('line_style', '-')
+                            ms_main = fc.get('marker_style', 'none')
+                            m_main = '' if ms_main in ('none', '') else ms_main
+                            l_main = '' if ls_main in ('none', '') else ls_main
+                            s1_color = fc.get('color_series_1', '#1f77b4')
+                            ax.plot(dist, prof, color=s1_color,
+                                     linestyle=l_main,
                                      lw=float(fc.get('line_width', 2.0)),
-                                     marker='o' if fc.get('marker_size', 0) > 0 else '',
+                                     marker=m_main,
                                      ms=float(fc.get('marker_size', 6)),
                                      mew=float(fc.get('marker_width', 1.0)))
                             apply_axis_styling(ax, fc,
                                                 title=f'{field} · {ptype} profile · frame {idx}',
-                                                title_fs=viz_cfg.get('title_font_size', 11),
                                                 xlabel='Position (nm)',
-                                                ylabel=f'{field} {unit}',
-                                                label_fs=viz_cfg.get('label_font_size', 9))
+                                                ylabel=f'{field} {unit}')
                             st.pyplot(fig); plt.close(fig)
 
                 with sub_b:
