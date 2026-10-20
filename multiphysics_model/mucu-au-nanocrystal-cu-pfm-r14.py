@@ -1,7 +1,22 @@
 """
-Au-assisted Cu-Cu diffusion bonding simulator — rectangular MPF edition (v3.4.12)
+Au-assisted Cu-Cu diffusion bonding simulator — rectangular MPF edition (v3.4.13)
 ===============================================================================
 Physics: MPF + Fickian/Hart diffusion + Solute Drag + Elastoplasticity.
+
+v3.4.13 change (fix top-row squashing with GridSpec):
+  * BUG FIX: The top-row subplots in the Diagnostics 4-panel figure were
+    still being squashed even after v3.4.10's switch to constrained_layout.
+    Root cause: constrained_layout sees the extra y-axis labels on the
+    twinx() subplot (Mass conservation, bottom-right) and dynamically
+    resizes that cell — at the expense of the top row.
+  * Fix: Replaced `plt.subplots(constrained_layout=True)` with an explicit
+    `GridSpec(2, 2, height_ratios=[1, 1], hspace=0.35, wspace=0.30)`
+    that LOCKS row heights at 50/50 regardless of twin axes. The layout
+    is now fully determined by the GridSpec parameters, not by a dynamic
+    layout engine that gets confused by twinx().
+  * Added `from matplotlib.gridspec import GridSpec` to the imports.
+  * The quick size control (width × height) now properly resizes ALL
+    four subplots proportionally, as the user expected.
 
 v3.4.12 change (UI cleanup — remove duplicate size controls):
   * Removed the duplicate figure-size controls from inside the enhanced
@@ -250,6 +265,7 @@ import matplotlib as mpl
 from matplotlib.colors import (Colormap, LinearSegmentedColormap,
                                 ListedColormap, LogNorm)
 from matplotlib.ticker import AutoMinorLocator
+from matplotlib.gridspec import GridSpec
 import matplotlib.animation as animation
 import plotly.graph_objects as go
 from datetime import datetime
@@ -4691,17 +4707,22 @@ def main():
                 fig_h = float(fig_cfg.get('diagnostics_height', 8.0))
                 t_xlabel = fig_cfg.get('xlabel_override', '').strip() or f't ({t_unit})'
 
-                # v3.4.10: use constrained_layout instead of tight_layout.
-                # tight_layout does NOT handle twin axes (twinx) correctly —
-                # it gives the twinx subplot (Mass conservation, bottom-right)
-                # disproportionate space, squashing the top row. This is why
-                # the user saw "only the bottom 2 change but not the top ones".
-                # constrained_layout is matplotlib's newer engine that handles
-                # twin axes properly.
-                use_cl = bool(fig_cfg.get('tight_layout', True))
-                fig, axes = plt.subplots(
-                    2, 2, figsize=(fig_w, fig_h),
-                    constrained_layout=use_cl)
+                # v3.4.13: Use GridSpec with explicit height_ratios=[1, 1]
+                # to LOCK row heights at 50/50 regardless of the twinx() on
+                # the bottom-right subplot (Mass conservation).
+                # Previous approach (constrained_layout=True) was buggy:
+                # constrained_layout saw the extra y-axis labels on the
+                # twin axis and dynamically resized that cell — at the
+                # expense of the top row, squashing it. GridSpec with
+                # explicit height_ratios prevents this dynamic resizing.
+                fig = plt.figure(figsize=(fig_w, fig_h))
+                gs = GridSpec(2, 2, figure=fig,
+                              height_ratios=[1, 1],
+                              hspace=0.35, wspace=0.30)
+                axes = np.array([
+                    [fig.add_subplot(gs[0, 0]), fig.add_subplot(gs[0, 1])],
+                    [fig.add_subplot(gs[1, 0]), fig.add_subplot(gs[1, 1])]
+                ])
                 axes[0, 0].plot(t, solver.history['c_top'], color=col1,
                                  linestyle=l_main, lw=lw_main, marker=m_main,
                                  ms=marker_size, mew=marker_ew,
@@ -4764,10 +4785,12 @@ def main():
                                     xlabel=t_xlabel, ylabel='mass ratio')
                 apply_legend_styling(axes[1, 1], fig_cfg)
 
-                # v3.4.10: do NOT call tight_layout() — constrained_layout
-                # (enabled above) handles it. Calling tight_layout on top
-                # of constrained_layout produces a matplotlib warning and
-                # can re-introduce the twin-axis squashing bug.
+                # v3.4.13: do NOT call tight_layout() or constrained_layout.
+                # GridSpec (above) explicitly sets height_ratios=[1,1] and
+                # hspace/wspace — the layout is fully determined. Calling
+                # tight_layout on top of GridSpec would re-introduce the
+                # twin-axis squashing bug (it gives the twinx subplot
+                # disproportionate space).
                 st.pyplot(fig); plt.close(fig)
 
         # ---- Line profiles -----------------------------------------
