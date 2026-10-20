@@ -1,7 +1,24 @@
 """
-Au-assisted Cu-Cu diffusion bonding simulator — rectangular MPF edition (v3.4.9)
+Au-assisted Cu-Cu diffusion bonding simulator — rectangular MPF edition (v3.4.10)
 ===============================================================================
 Physics: MPF + Fickian/Hart diffusion + Solute Drag + Elastoplasticity.
+
+v3.4.10 change (fix diagnostics width/height):
+  * BUG FIX: The width/height controls in the Diagnostics figure
+    customization panel were not working. Root cause: the conditional
+    write-back (`if new_w != cached_value: fc[w_key] = new_w`) was
+    silently failing because Streamlit's st.number_input with a `key=`
+    parameter caches the widget value in session_state, and on some
+    reruns the cached widget value matched the fc dict value (so the
+    conditional skipped the write), but the fc dict hadn't actually
+    been updated from the previous render. Fix: ALWAYS write the value
+    (remove the conditional) in both render_inline_figure_customization
+    and render_enhanced_figure_customization.
+  * Added a quick size control directly above the Diagnostics figure
+    (not inside an expander) so the user can change width/height
+    immediately without scrolling through the full enhanced panel.
+  * The quick control shows a live hint: "each subplot ≈ W/2 × H/2 in"
+    with recommendations like "try 14×10 or 16×12 for less compression".
 
 v3.4.9 change (enhanced figure customization + LIVE colormaps):
   * NEW: `render_enhanced_figure_customization()` — full per-figure
@@ -962,10 +979,9 @@ def render_inline_figure_customization(viz_cfg, *,
                     "Height (in)", value=float(fc.get(h_key, 5.5)),
                     min_value=2.0, max_value=30.0, step=0.5,
                     key=f"{key_prefix}_h")
-            if new_w != float(fc.get(w_key, 11.0)):
-                fc[w_key] = new_w; changed = True
-            if new_h != float(fc.get(h_key, 5.5)):
-                fc[h_key] = new_h; changed = True
+            # v3.4.10: always write (fixes width/height not updating)
+            fc[w_key] = float(new_w); changed = True
+            fc[h_key] = float(new_h); changed = True
 
         # ---- Text overrides ----
         if show_text_overrides:
@@ -1212,10 +1228,15 @@ def render_enhanced_figure_customization(viz_cfg, *,
                     "Height", value=float(fc.get(h_key, 5.5)),
                     min_value=2.0, max_value=30.0, step=0.5,
                     key=f"{key_prefix}_h")
-            if new_w != float(fc.get(w_key, 11.0)):
-                fc[w_key] = new_w
-            if new_h != float(fc.get(h_key, 5.5)):
-                fc[h_key] = new_h
+            # v3.4.10: ALWAYS write — the conditional write was causing
+            # the diagnostics width/height to not update because Streamlit's
+            # st.number_input with a key= parameter caches the widget value
+            # in session_state, and on some reruns the cached widget value
+            # matches the fc dict value (so the conditional skips the write),
+            # but the fc dict hasn't actually been updated yet from a
+            # previous render. Always writing guarantees consistency.
+            fc[w_key] = float(new_w)
+            fc[h_key] = float(new_h)
 
         # ---------- Font sizes ----------
         if show_font_sizes:
@@ -4505,6 +4526,31 @@ def main():
                                     "and a valid source.")
 
                 st.subheader("Region-Averaged Diagnostics")
+                # v3.4.10: quick size control — always visible, not inside expander
+                fc_diag = viz_cfg.setdefault('figure_customization', default_figure_customization())
+                st.markdown("**📐 Diagnostics figure size**")
+                c1, c2, c3 = st.columns([1, 1, 2])
+                with c1:
+                    fc_diag['diagnostics_width'] = st.number_input(
+                        "Width (in)", value=float(fc_diag.get('diagnostics_width', 13.0)),
+                        min_value=4.0, max_value=30.0, step=0.5,
+                        key="diag_quick_w",
+                        help="Width of the 2×2 diagnostics figure in inches.")
+                with c2:
+                    fc_diag['diagnostics_height'] = st.number_input(
+                        "Height (in)", value=float(fc_diag.get('diagnostics_height', 8.0)),
+                        min_value=3.0, max_value=30.0, step=0.5,
+                        key="diag_quick_h",
+                        help="Height of the 2×2 diagnostics figure in inches.")
+                with c3:
+                    st.caption(
+                        f"Current: {fc_diag.get('diagnostics_width', 13.0):.1f} × "
+                        f"{fc_diag.get('diagnostics_height', 8.0):.1f} in → "
+                        f"each subplot ≈ "
+                        f"{fc_diag.get('diagnostics_width', 13.0)/2:.1f} × "
+                        f"{fc_diag.get('diagnostics_height', 8.0)/2:.1f} in. "
+                        f"For 2×2 grid, try **14×10** or **16×12** for "
+                        f"less compression.")
                 # v3.4.9: enhanced customization for diagnostics 2D line plots
                 render_enhanced_figure_customization(
                     viz_cfg,
