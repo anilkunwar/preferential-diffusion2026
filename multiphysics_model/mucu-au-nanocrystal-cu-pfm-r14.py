@@ -4596,7 +4596,17 @@ def main():
                 fig_h = float(fig_cfg.get('diagnostics_height', 8.0))
                 t_xlabel = fig_cfg.get('xlabel_override', '').strip() or f't ({t_unit})'
 
-                fig, axes = plt.subplots(2, 2, figsize=(fig_w, fig_h))
+                # v3.4.10: use constrained_layout instead of tight_layout.
+                # tight_layout does NOT handle twin axes (twinx) correctly —
+                # it gives the twinx subplot (Mass conservation, bottom-right)
+                # disproportionate space, squashing the top row. This is why
+                # the user saw "only the bottom 2 change but not the top ones".
+                # constrained_layout is matplotlib's newer engine that handles
+                # twin axes properly.
+                use_cl = bool(fig_cfg.get('tight_layout', True))
+                fig, axes = plt.subplots(
+                    2, 2, figsize=(fig_w, fig_h),
+                    constrained_layout=use_cl)
                 axes[0, 0].plot(t, solver.history['c_top'], color=col1,
                                  linestyle=l_main, lw=lw_main, marker=m_main,
                                  ms=marker_size, mew=marker_ew,
@@ -4659,7 +4669,10 @@ def main():
                                     xlabel=t_xlabel, ylabel='mass ratio')
                 apply_legend_styling(axes[1, 1], fig_cfg)
 
-                plt.tight_layout()
+                # v3.4.10: do NOT call tight_layout() — constrained_layout
+                # (enabled above) handles it. Calling tight_layout on top
+                # of constrained_layout produces a matplotlib warning and
+                # can re-introduce the twin-axis squashing bug.
                 st.pyplot(fig); plt.close(fig)
 
         # ---- Line profiles -----------------------------------------
