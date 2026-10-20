@@ -1,7 +1,25 @@
 """
-Au-assisted Cu-Cu diffusion bonding simulator — rectangular MPF edition (v3.4.11)
+Au-assisted Cu-Cu diffusion bonding simulator — rectangular MPF edition (v3.4.12)
 ===============================================================================
 Physics: MPF + Fickian/Hart diffusion + Solute Drag + Elastoplasticity.
+
+v3.4.12 change (UI cleanup — remove duplicate size controls):
+  * Removed the duplicate figure-size controls from inside the enhanced
+    customization expander for the Diagnostics figure. The quick size
+    control block (outside the expander) is now the ONLY place to set
+    the diagnostics width/height. This eliminates the visual clutter
+    and the risk of future widget-key collisions.
+  * Implementation: `render_enhanced_figure_customization(size_keys=None, ...)`
+    — when size_keys is None, the enhanced panel skips the figure-size
+    section entirely and only shows styling controls (fonts, colors,
+    markers, grid, legend, spines, ticks, text overrides).
+  * Added an instant-update `st.rerun()` trigger to the quick size block:
+    when the user changes the width or height and presses Enter (or
+    clicks elsewhere), the figure updates immediately instead of waiting
+    for the next natural rerun.
+  * Design principle applied: **Progressive Disclosure** — the most
+    common action (resizing) is visible immediately; advanced styling
+    is grouped inside a collapsible expander.
 
 v3.4.11 change (fix StreamlitValueBelowMinError):
   * BUG FIX: Multiple figure-size widgets (the quick size control above
@@ -4590,19 +4608,22 @@ def main():
                                     "and a valid source.")
 
                 st.subheader("Region-Averaged Diagnostics")
-                # v3.4.10: quick size control — always visible, not inside expander
+                # v3.4.10/12: quick size control — always visible, not inside expander.
+                # This is the ONLY place the diagnostics width/height are edited.
+                # The enhanced panel below has size_keys=None so it doesn't
+                # duplicate these controls (clean separation of layout vs styling).
                 fc_diag = viz_cfg.setdefault('figure_customization', default_figure_customization())
                 st.markdown("**📐 Diagnostics figure size**")
                 c1, c2, c3 = st.columns([1, 1, 2])
                 with c1:
                     # v3.4.11: use clamped wrapper to avoid ValueBelowMin/AboveMax
-                    fc_diag['diagnostics_width'] = _clamped_number_input(
+                    new_w = _clamped_number_input(
                         "Width (in)", value=fc_diag.get('diagnostics_width', 13.0),
                         min_value=4.0, max_value=30.0, step=0.5,
                         key="diag_quick_w",
                         help="Width of the 2×2 diagnostics figure in inches.")
                 with c2:
-                    fc_diag['diagnostics_height'] = _clamped_number_input(
+                    new_h = _clamped_number_input(
                         "Height (in)", value=fc_diag.get('diagnostics_height', 8.0),
                         min_value=3.0, max_value=30.0, step=0.5,
                         key="diag_quick_h",
@@ -4615,10 +4636,20 @@ def main():
                         f"each subplot ≈ {_cur_w/2:.1f} × {_cur_h/2:.1f} in. "
                         f"For 2×2 grid, try **14×10** or **16×12** for "
                         f"less compression.")
-                # v3.4.9: enhanced customization for diagnostics 2D line plots
+                # v3.4.12: instant update — commit + rerun as soon as the
+                # user changes the size (so they see the new figure immediately
+                # without having to click elsewhere first).
+                if (new_w != fc_diag.get('diagnostics_width') or
+                        new_h != fc_diag.get('diagnostics_height')):
+                    fc_diag['diagnostics_width'] = float(new_w)
+                    fc_diag['diagnostics_height'] = float(new_h)
+                    st.rerun()
+                # v3.4.9/12: enhanced customization for diagnostics 2D line plots.
+                # size_keys=None → hides size controls inside the expander
+                # (they're now in the quick size block above, avoiding duplication).
                 render_enhanced_figure_customization(
                     viz_cfg,
-                    size_keys=('diagnostics_width', 'diagnostics_height'),
+                    size_keys=None,
                     key_prefix='diag',
                     label='🎨 Diagnostics — full 2D line customization',
                     show_line_styles=True,
