@@ -1,7 +1,28 @@
 """
-Au-assisted Cu-Cu diffusion bonding simulator — rectangular MPF edition (v3.4.13)
+Au-assisted Cu-Cu diffusion bonding simulator — rectangular MPF edition (v3.4.14)
 ===============================================================================
 Physics: MPF + Fickian/Hart diffusion + Solute Drag + Elastoplasticity.
+
+v3.4.14 change (fix top-row squashing — the REAL root cause):
+  * BUG FIX: The previous v3.4.13 attempt (GridSpec with height_ratios=[1,1])
+    was necessary but NOT sufficient. The real root cause was
+    `apply_axis_styling()` applying `ax.set_aspect('equal')` to ALL axes
+    by default — including the 4 diagnostics time-series subplots.
+  * For time-series plots where x spans 0–1.5 s and y spans 0–0.05,
+    `set_aspect('equal')` forces matplotlib to shrink the axes vertically
+    (to preserve a 1:1 data-unit ratio) — squashing the top row, even
+    when GridSpec allocates equal row heights. This is why v3.4.13 didn't
+    fully fix the issue.
+  * Fix: Added a `force_aspect` parameter to `apply_axis_styling()`. The
+    diagnostics figure now passes `force_aspect='auto'` to ALL four
+    subplots, overriding the default 'equal' aspect for time-series axes.
+    Spatial-map figures (multi-field grid, overlay, vector overlay) still
+    use the default 'equal' aspect — which is correct for them.
+  * Also applied `force_aspect='auto'` to the Line Profile single-frame
+    plot (also a 1D series, not a spatial map).
+  * The function now uses `ax.set_aspect('equal', adjustable='box')` for
+    spatial maps (preserves the box) and `ax.set_aspect('auto')` for
+    time-series (lets matplotlib fill the available space).
 
 v3.4.13 change (fix top-row squashing with GridSpec):
   * BUG FIX: The top-row subplots in the Diagnostics 4-panel figure were
@@ -863,7 +884,8 @@ def get_viz_config():
 
 
 def apply_axis_styling(ax, fig_cfg, *, title=None, xlabel=None, ylabel=None,
-                       title_fs=None, label_fs=None, grid_axes=None):
+                       title_fs=None, label_fs=None, grid_axes=None,
+                       force_aspect=None):
     """v3.4: Apply common figure-customization settings to a matplotlib Axes.
 
     Parameters
@@ -879,6 +901,10 @@ def apply_axis_styling(ax, fig_cfg, *, title=None, xlabel=None, ylabel=None,
         Optional font-size override for the title / axis labels.
     grid_axes : matplotlib Axes or None
         If provided, grid is applied to this Axes; otherwise to `ax`.
+    force_aspect : str or None
+        If 'auto' or 'equal', override fig_cfg['axis_equal'] for this Axes.
+        Use 'auto' for time-series plots (diagnostics) where 'equal' would
+        squash the axes. Use None to defer to fig_cfg['axis_equal'].
     """
     if fig_cfg is None or ax is None:
         return
@@ -935,11 +961,28 @@ def apply_axis_styling(ax, fig_cfg, *, title=None, xlabel=None, ylabel=None,
     ax.tick_params(width=float(fig_cfg.get('tick_width', 1.0)),
                    length=float(fig_cfg.get('tick_length', 4)),
                    direction=fig_cfg.get('tick_direction', 'out'))
-    if fig_cfg.get('axis_equal', True):
-        try:
-            ax.set_aspect('equal')
-        except Exception:
-            pass
+    # v3.4.14: Aspect ratio handling.
+    # - For spatial maps (2D field images): 'equal' is correct — preserves
+    #   the 1:1 physical x/y ratio so a 600×300 nm domain doesn't look
+    #   stretched.
+    # - For time-series line plots (diagnostics): 'equal' is WRONG — it
+    #   forces matplotlib to shrink the axes vertically (because x spans
+    #   0–1.5 s while y spans 0–0.05), squashing the plot.
+    # The caller can pass force_aspect='auto' to override the fig_cfg value
+    # for time-series axes (this is what the diagnostics figure does).
+    if force_aspect is not None:
+        aspect_mode = force_aspect
+    elif fig_cfg.get('axis_equal', True):
+        aspect_mode = 'equal'
+    else:
+        aspect_mode = 'auto'
+    try:
+        if aspect_mode == 'equal':
+            ax.set_aspect('equal', adjustable='box')
+        else:
+            ax.set_aspect('auto')
+    except Exception:
+        pass
 
 
 def apply_legend_styling(ax, fig_cfg):
@@ -4736,7 +4779,8 @@ def main():
                 axes[0, 0].set_title('Au concentration: Poly-Cu vs nc-Cu')
                 apply_axis_styling(axes[0, 0], fig_cfg,
                                     title='Au concentration: Poly-Cu vs nc-Cu',
-                                    xlabel=t_xlabel, ylabel='mean c (Au)')
+                                    xlabel=t_xlabel, ylabel='mean c (Au)',
+                                    force_aspect='auto')
                 apply_legend_styling(axes[0, 0], fig_cfg)
 
                 axes[0, 1].plot(t, solver.history['gb_top'], color=col1,
@@ -4749,7 +4793,8 @@ def main():
                                  label='nc-Cu')
                 apply_axis_styling(axes[0, 1], fig_cfg,
                                     title='GB density (Hart indicator)',
-                                    xlabel=t_xlabel, ylabel='mean φ_gb')
+                                    xlabel=t_xlabel, ylabel='mean φ_gb',
+                                    force_aspect='auto')
                 apply_legend_styling(axes[0, 1], fig_cfg)
 
                 axes[1, 0].plot(t, np.array(solver.history['avg_stress'])/1e9,
@@ -4762,7 +4807,8 @@ def main():
                                  label='Max')
                 apply_axis_styling(axes[1, 0], fig_cfg,
                                     title='Stress evolution',
-                                    xlabel=t_xlabel, ylabel='σ (GPa)')
+                                    xlabel=t_xlabel, ylabel='σ (GPa)',
+                                    force_aspect='auto')
                 apply_legend_styling(axes[1, 0], fig_cfg)
 
                 au_mass = np.array(solver.history['au_mass'])
@@ -4782,7 +4828,8 @@ def main():
                 ax2.set_ylabel('mean c')
                 apply_axis_styling(axes[1, 1], fig_cfg,
                                     title='Mass conservation (guarded)',
-                                    xlabel=t_xlabel, ylabel='mass ratio')
+                                    xlabel=t_xlabel, ylabel='mass ratio',
+                                    force_aspect='auto')
                 apply_legend_styling(axes[1, 1], fig_cfg)
 
                 # v3.4.13: do NOT call tight_layout() or constrained_layout.
@@ -4859,7 +4906,8 @@ def main():
                             apply_axis_styling(ax, fc,
                                                 title=f'{field} · {ptype} profile · frame {idx}',
                                                 xlabel='Position (nm)',
-                                                ylabel=f'{field} {unit}')
+                                                ylabel=f'{field} {unit}',
+                                                force_aspect='auto')
                             st.pyplot(fig); plt.close(fig)
 
                 with sub_b:
