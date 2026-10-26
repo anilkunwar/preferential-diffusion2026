@@ -65,7 +65,7 @@ or batch-invoked from a separate analysis script.
 ## How to run
 
 ```bash
-streamlit run au_cu_sim_v3.4.15_sustainability.py
+streamlit run Sustainability-mucu-au-nanocrystal-cu-pfm-r15.py
 ```
 
 Then:
