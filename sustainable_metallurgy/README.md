@@ -2,6 +2,8 @@
 
 [![continuummodelnt2d](https://img.shields.io/badge/audiff15-streamlit-violet)](https://preferential-au-diffusion15.streamlit.app/) (figure customization, temporal features, limiting the edges of colorscale bars, c variable annotated properly within the calculation framework, customization of the visualizations, diffusion correction  and  simulation produced stable results , basic code, geometry change of domain from square to rectangle)
 
+[![continuummodelnt2d](https://img.shields.io/badge/audiff15a-streamlit-violet)](https://preferential-au-diffusion15a.streamlit.app/) (figure customization, temporal features, limiting the edges of colorscale bars, c variable annotated properly within the calculation framework, customization of the visualizations, diffusion correction  and  simulation produced stable results , basic code, geometry change of domain from square to rectangle)
+
 
 
 # Sustainability — Implementation README
