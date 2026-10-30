@@ -1769,6 +1769,27 @@ def render_live_colormap_picker(viz_cfg, *, key_prefix='cmap',
 
 
 # ============================================================================
+# SUBSTRATE CLASSIFICATION (data-driven sustainability architecture)
+# ============================================================================
+def classify_substrate(d_nm):
+    """Classify substrate based on average grain size threshold.
+
+    Rule (per the sustainability spec):
+        <d> <  100 nm  ->  Nanocrystalline (nc-Cu)
+        <d> >= 100 nm  ->  Polycrystalline (Poly-Cu)
+
+    Used by the Compare Saved (Temporal) and Sustainability tabs to
+    auto-label saved runs by their bottom-layer microstructure, so the
+    user does not have to remember which run was nc-Cu and which was
+    Poly-Cu when comparing across sessions.
+    """
+    d = float(d_nm)
+    if d < 100.0:
+        return "Nanocrystalline (nc-Cu)"
+    return "Polycrystalline (Poly-Cu)"
+
+
+# ============================================================================
 # MATERIAL PROPERTIES
 # ============================================================================
 class MaterialProperties:
@@ -3431,12 +3452,24 @@ class SimulationDatabase:
 
     @staticmethod
     @handle_errors
-    def save(params, history, geometry_data, metadata=None, run_time=0.0):
+    def save(params, history, geometry_data, metadata=None, run_time=0.0,
+             diagnostics=None):
+        """Save a simulation to the in-memory database.
+
+        v3.4.17 change: the new ``diagnostics`` kwarg stores the lightweight
+        1D time-series (``solver.history`` — time, c_top, c_bot, au_mass,
+        gb_top, gb_bot, stresses, energy). This is the bridge between the
+        saved temporal data and the Sustainability / Compare-Saved-Temporal
+        tabs, which previously relied on the *active in-memory solver* or
+        a geometric proxy. Now they can pull measured kinetics from any
+        saved run.
+        """
         if 'sims' not in st.session_state:
             st.session_state.sims = {}
         sid = SimulationDatabase._hash(params)
         st.session_state.sims[sid] = {
             'id': sid, 'params': params, 'results_history': history,
+            'diagnostics': diagnostics or {},   # 1D time-series for temporal comparison + sustainability
             'geometry_data': geometry_data,
             'metadata': metadata or {'created_at': datetime.now().isoformat(),
                                       'run_time': run_time},
@@ -5290,8 +5323,15 @@ def main():
                     st.session_state.history = history
                     st.session_state.timesteps = timesteps
                     st.session_state.solver = solver
-                    sid = SimulationDatabase.save(params, history, None,
-                                                   run_time=n_steps * params['dt'])
+                    # Save the scalar diagnostics (1D time-series) alongside
+                    # the 2D field history. This bridges the saved temporal
+                    # data to the Compare Saved (Temporal) and Sustainability
+                    # tabs, which now compute measured S_t from actual saved
+                    # runs instead of relying on the active in-memory solver.
+                    sid = SimulationDatabase.save(
+                        params, history, None,
+                        run_time=n_steps * params['dt'],
+                        diagnostics=solver.history)
                     st.session_state.last_sid = sid
                     st.balloons()
 
@@ -6495,40 +6535,92 @@ def main():
         # the time / temperature / pressure required to reach the same
         # bonding quality must go UP by the corresponding factor.
         with tabs[7]:
-            st.header("Sustainability Analysis (v3.4.16)")
+            st.header("🌱 Sustainability Analysis (Data-Driven)")
             st.caption(
-                "Quantifying the energy / throughput / Au-utilization "
-                "advantage of the nc-Cu bottom layer vs. a symmetric "
-                "Poly-Cu / Au / Poly-Cu reference. v3.4.16 adds: (i) "
-                "SI-second conversion for energy/CO2 (bug #1 fix), "
-                "(ii) explicit reached/unreached flags (bug #2 fix), "
-                "(iii) effective-Q Arrhenius dT with 95% Monte-Carlo CI "
-                "(bug #3 fix), (iv) an optional PAIRED experiment that "
-                "measures (not estimates) the Poly-Cu reference, "
-                "(v) full cost-per-joint breakdown with break-even Cu "
-                "premium, (vi) composite MCDA score, and (vii) eight "
-                "publication-quality figures.")
+                "Select saved simulations to compute MEASURED sustainability "
+                "metrics. Substrate type is auto-classified by average grain "
+                "size: d < 100 nm = Nanocrystalline (nc-Cu); d >= 100 nm = "
+                "Polycrystalline (Poly-Cu). v3.4.17 decouples this tab from "
+                "the active in-memory solver — all kinetics now come "
+                "from saved 1D diagnostics (`solver.history`) stored in the "
+                "SimulationDatabase, so you can compare runs across sessions "
+                "and grain sizes without re-running. Workflow: (1) set bottom "
+                "layer = nc-Cu, run, save; (2) set bottom layer = Poly-Cu "
+                "(reference), run, save; (3) select both below.")
 
-            if 'history' not in st.session_state or 'solver' not in st.session_state:
-                st.info("Run a simulation first - the Sustainability "
-                        "tab reads `solver.history` to compute time-to-target.")
+            sims_db = SimulationDatabase.all()
+            if not sims_db:
+                st.info(
+                    "Run and save simulations first to enable data-driven "
+                    "sustainability analysis. The Sustainability tab now "
+                    "reads saved 1D diagnostics from the SimulationDatabase "
+                    "instead of the active in-memory solver.")
             else:
-                solver = st.session_state.solver
-                params = st.session_state.params
+                # ---- Build selection list with auto-classification ----
+                sim_options = []
+                for sid, sim in sims_db.items():
+                    d = float(sim['params'].get('nc_grain_size_nm', 0))
+                    sub_type = classify_substrate(d)
+                    diag = sim.get('diagnostics', {})
+                    c_bot_arr = np.array(diag.get('c_bot', [0]))
+                    c_max = float(np.max(c_bot_arr)) if c_bot_arr.size else 0.0
+                    has_diag = bool(diag and diag.get('time'))
+                    tag = "OK" if has_diag else "no-diag"
+                    sim_options.append({
+                        'id': sid,
+                        'label': (f"{sid[:6]}… | d={d:.0f} nm ({sub_type}) | "
+                                  f"max<c>={c_max:.3f} | {tag}"),
+                        'd': d,
+                        'sim': sim,
+                        'has_diag': has_diag,
+                    })
+
+                # ---- 1. Select configurations ----
+                st.subheader("1. Select configurations")
+                c1, c2 = st.columns(2)
+                with c1:
+                    ref_idx = st.selectbox(
+                        "Reference (baseline)",
+                        range(len(sim_options)),
+                        format_func=lambda i: sim_options[i]['label'],
+                        key="sus_ref_idx",
+                        help="Select the Poly-Cu or larger-grain reference "
+                             "(d >= 100 nm). This is the slower configuration.")
+                with c2:
+                    design_idx = st.selectbox(
+                        "Design (nc-Cu)",
+                        range(len(sim_options)),
+                        format_func=lambda i: sim_options[i]['label'],
+                        key="sus_design_idx",
+                        help="Select the nanocrystalline design (d < 100 nm). "
+                             "This is the faster, as-designed configuration.")
+
+                ref_data = sim_options[ref_idx]
+                design_data = sim_options[design_idx]
+
+                if ref_idx == design_idx:
+                    st.warning(
+                        "⚠️ Reference and Design are the same "
+                        "simulation. S_t will be 1.0x (no penalty). Select "
+                        "two different runs for a meaningful comparison.")
+
+                if not ref_data['has_diag'] or not design_data['has_diag']:
+                    st.warning(
+                        "⚠️ One or both selected simulations have "
+                        "no saved 1D diagnostics (time-series). This happens "
+                        "for runs saved before v3.4.17. Re-run and save to "
+                        "populate the diagnostics. Metrics below will fall "
+                        "back to geometric S_t (Hart linear-scaling).")
+
+                # Use the design sim's params as the calculation context
+                params = dict(design_data['sim']['params'])
                 t_unit = get_time_unit_label(params)
+                d_current = float(design_data['d'])
+                d_ref_sel = float(ref_data['d'])
+                gb_width = float(params.get('gb_width_nm', 1.5))
 
-                # =====================================================
-                # INPUTS - bonding target, Arrhenius constants, cost model
-                # =====================================================
-                st.subheader("Bonding-quality target")
-                target_c = st.slider(
-                    "Target <c>_Ob* (Au utilization threshold)",
-                    0.01, 0.20, 0.06, 0.005,
-                    help="Region-averaged Au concentration in the bottom "
-                         "layer required to consider the joint well-bonded. "
-                         "0.06 = 77%-of-max threshold from prior phase-field runs.")
-
-                st.subheader("Material constants (Arrhenius + uncertainty)")
+                # ---- 2. Material constants (Arrhenius + uncertainty) ----
+                st.subheader("2. Material constants (Arrhenius + uncertainty)")
                 c1, c2, c3 = st.columns(3)
                 with c1:
                     Q_gb_kj = st.number_input(
@@ -6547,7 +6639,7 @@ def main():
                     Q_lat_J = float(Q_lat_kj) * 1e3
                 with c3:
                     sigma_Q_kj = st.number_input(
-                        "sigma_Q (kJ/mol, lit. uncertainty)", value=20.0,
+                        "σ_Q (kJ/mol, lit. uncertainty)", value=20.0,
                         min_value=0.0, max_value=60.0, step=1.0, key="sus_sigma_q",
                         help="1-sigma literature uncertainty on Q_gb. Used for "
                              "the Monte-Carlo 95% CI on dT. +/-20 kJ/mol is standard.")
@@ -6557,18 +6649,25 @@ def main():
                     step=5.0, format="%.1f", key="sus_t_bond",
                     help="Bonding temperature in Kelvin. 250 C = 523 K (baseline).")
 
-                st.subheader("Reference configuration")
-                d_current = float(params.get('nc_grain_size_nm', 95.0))
+                # Optional override of d_ref (defaults to the reference sim's d)
                 d_ref = st.number_input(
-                    "Reference Poly-Cu grain size d_ref (nm)",
-                    value=150.0, min_value=50.0, max_value=2000.0,
+                    "Reference grain size d_ref (nm)",
+                    value=d_ref_sel, min_value=50.0, max_value=2000.0,
                     step=10.0, format="%.1f", key="sus_d_ref",
-                    help="Grain size of the Poly-Cu reference bottom layer. "
-                         "Default 150 nm matches the top Poly-Cu; 500 nm replicates "
-                         "conventional bulk Cu.")
-                gb_width = float(params.get('gb_width_nm', 1.5))
+                    help="Grain size of the Poly-Cu reference. Defaults to the "
+                         "selected reference simulation's grain size. Override "
+                         "only if you want to explore a hypothetical d_ref.")
 
-                # ---- Cost model (NEW in v3.4.16) ----
+                # ---- 3. Bonding-quality target ----
+                st.subheader("3. Bonding-quality target")
+                target_c = st.slider(
+                    "Target <c>_Ob* (Au utilization threshold)",
+                    0.01, 0.20, 0.06, 0.005,
+                    help="Region-averaged Au concentration in the bottom "
+                         "layer required to consider the joint well-bonded. "
+                         "0.06 = 77%-of-max threshold from prior phase-field runs.")
+
+                # ---- Cost model ----
                 with st.expander("Cost-model inputs (energy + machine + material)",
                                   expanded=False):
                     st.caption(
@@ -6612,491 +6711,571 @@ def main():
                                  "Decays exponentially with d in the Pareto plot.")
 
                 # =====================================================
-                # PAIRED EXPERIMENT (the biggest scientific win)
+                # EXTRACT DIAGNOSTICS FROM SAVED SIMS
+                # =====================================================
+                ref_diag = ref_data['sim'].get('diagnostics', {})
+                design_diag = design_data['sim'].get('diagnostics', {})
+
+                t_ref = np.array(ref_diag.get('time', []))
+                c_ref = np.array(ref_diag.get('c_bot', []))
+                t_des = np.array(design_diag.get('time', []))
+                c_des = np.array(design_diag.get('c_bot', []))
+
+                # =====================================================
+                # COMPUTE MEASURED TIME-TO-TARGET
+                # =====================================================
+                t_des_reach, des_reached = _time_to_target(t_des, c_des, target_c)
+                t_ref_reach, ref_reached = _time_to_target(t_ref, c_ref, target_c)
+
+                # =====================================================
+                # 4. MEASURED BONDING KINETICS
                 # =====================================================
                 st.markdown("---")
-                st.subheader("Paired experiment (measured Poly-Cu reference)")
+                st.subheader("4. Measured bonding kinetics")
                 st.caption(
-                    "v3.4.16 adds a **second solver run** with the bottom layer "
-                    "switched to Poly-Cu (same grain size as the top Poly-Cu). "
-                    "This gives a *measured* S_t = t_poly / t_nc, not the geometric "
-                    "time-stretch proxy. Cached by params hash so re-running with "
-                    "the same settings is instant.")
+                    f"Design: d={design_data['d']:.0f} nm "
+                    f"({classify_substrate(design_data['d'])})  |  "
+                    f"Reference: d={ref_data['d']:.0f} nm "
+                    f"({classify_substrate(ref_data['d'])}).  "
+                    f"Curves are pulled directly from the saved 1D diagnostics "
+                    f"of the two selected simulations. No geometric proxy.")
 
-                paired_results = None
-                paired_cache_key = f"paired_{SimulationDatabase._hash(params)}_t{target_c:.3f}"
-                paired_cached = st.session_state.get(paired_cache_key)
-
-                pc1, pc2 = st.columns([1, 2])
-                with pc1:
-                    if st.button("Run paired experiment",
-                                  help="Runs the solver twice (nc-Cu + Poly-Cu) "
-                                       "and stores the measured S_t. ~2x the "
-                                       "single-run cost."):
-                        with st.spinner("Running paired experiment (2 solver passes)..."):
-                            pr = run_paired_experiment(
-                                params,
-                                target_c=target_c,
-                                max_steps=int(params.get('n_steps', 300)),
-                                save_freq=int(params.get('save_frequency', 10)))
-                            if pr is FAILED or pr is None:
-                                st.error(f"Paired experiment failed: {FAILED.reason}")
-                            else:
-                                st.session_state[paired_cache_key] = pr
-                                paired_cached = pr
-                                st.success("Paired experiment complete.")
-                                st.rerun()
-                with pc2:
-                    if paired_cached is not None:
-                        nc_r = paired_cached.get('nc', {})
-                        poly_r = paired_cached.get('poly', {})
-                        S_meas = paired_cached.get('poly', {}).get('S_t_measured', float('nan'))
-                        s_meas_str = (f"{S_meas:.2f}x" if np.isfinite(S_meas)
-                                       else "N/A (target not reached in one or both runs)")
-                        st.metric(
-                            "Measured S_t (paired run)",
-                            s_meas_str,
-                            delta=(f"nc reached: {nc_r.get('reached', False)}; "
-                                   f"poly reached: {poly_r.get('reached', False)}"),
-                            delta_color="off")
-                        if st.button("Clear paired-experiment cache",
-                                      key="clear_paired"):
-                            if paired_cache_key in st.session_state:
-                                del st.session_state[paired_cache_key]
-                            st.rerun()
-                    else:
-                        st.info("No paired run cached for the current params + "
-                                "target. Click Run to execute; results will be reused "
-                                "until params change. Without a paired run, all "
-                                "S_t values below are GEOMETRIC (Hart linear-scaling).")
-
-                paired_results = paired_cached
+                if t_des.size > 0 or t_ref.size > 0:
+                    fig, ax = plt.subplots(figsize=(10, 5))
+                    if t_des.size > 0:
+                        ax.plot(t_des, c_des, 'r-', lw=2.5,
+                                label=f"Design: d={design_data['d']:.0f} nm "
+                                      f"({classify_substrate(design_data['d'])})")
+                    if t_ref.size > 0:
+                        ax.plot(t_ref, c_ref, 'b--', lw=2.5,
+                                label=f"Reference: d={ref_data['d']:.0f} nm "
+                                      f"({classify_substrate(ref_data['d'])})")
+                    ax.axhline(target_c, color='k', ls=':', lw=1.5,
+                               label=f"Target {target_c:.3f}")
+                    if des_reached:
+                        ax.plot(t_des_reach, target_c, 'ro', ms=12, zorder=5)
+                        ax.annotate(f"t_reach={t_des_reach:.2f}",
+                                    (t_des_reach, target_c),
+                                    textcoords="offset points", xytext=(0, 12),
+                                    ha='center', color='red')
+                    if ref_reached:
+                        ax.plot(t_ref_reach, target_c, 'bs', ms=12, zorder=5)
+                        ax.annotate(f"t_reach={t_ref_reach:.2f}",
+                                    (t_ref_reach, target_c),
+                                    textcoords="offset points", xytext=(0, 12),
+                                    ha='center', color='blue')
+                    ax.set_xlabel(f"Time ({t_unit})")
+                    ax.set_ylabel("Region-averaged <c>_Ob")
+                    ax.set_title("Bonding kinetics — measured from saved diagnostics")
+                    ax.legend(loc='best', fontsize=9)
+                    ax.grid(True, alpha=0.3)
+                    st.pyplot(fig); plt.close(fig)
+                else:
+                    st.info("No trajectory data available in the selected "
+                            "simulations' diagnostics.")
 
                 # =====================================================
-                # COMPUTE METRICS
-                # =====================================================
-                metrics = compute_sustainability_metrics(
-                    solver_history=solver.history,
-                    params=params,
-                    target_c=target_c,
-                    d_current=d_current,
-                    d_ref=d_ref,
-                    gb_width=gb_width,
-                    Q_gb_J=Q_gb_J,
-                    Q_lat_J=Q_lat_J,
-                    T_bond_K=T_bond_K,
-                    applied_stress_MPa=(
-                        float(params.get('applied_stress', 30e6)) / 1e6),
-                    furnace_kW=furnace_kW,
-                    grid_carbon_kg_per_kWh=grid_g,
-                    batch_joints=int(batch_joints),
-                    energy_price_usd_kwh=energy_price,
-                    machine_hourly_usd=machine_hourly,
-                    cu_mass_kg=cu_mass_kg,
-                    au_mass_kg=(au_mass_kg if au_mass_kg > 0 else None),
-                    nano_premium_usd_kg=nano_premium,
-                    sigma_Q_J=sigma_Q_J,
-                    paired_results=paired_results)
-
-                # =====================================================
-                # PRIMARY METRIC CARDS
+                # 5. SUSTAINABILITY METRICS (MEASURED)
                 # =====================================================
                 st.markdown("---")
-                st.subheader("Primary sustainability penalties")
-                if not metrics['nc_reached']:
-                    st.warning(
-                        f"nc-Cu did NOT reach target <c>*={target_c:.3f} in this run. "
-                        f"S_t is geometric only. Consider increasing n_steps.")
-                if paired_results is not None and not metrics['poly_reached']:
-                    st.warning(
-                        f"Poly-Cu reference did NOT reach target <c>*={target_c:.3f} "
-                        f"within max_steps. Measured S_t is unavailable; geometric S_t "
-                        f"is shown. Consider raising n_steps or lowering the target.")
+                st.subheader("5. Sustainability metrics (measured)")
 
-                c1, c2, c3, c4 = st.columns(4)
-                with c1:
-                    s_meas = metrics['S_t_measured']
-                    if np.isfinite(s_meas):
-                        s_label = f"{metrics['S_t']:.1f}x"
-                        s_delta = f"MEASURED (paired): {s_meas:.2f}x"
-                    else:
-                        s_label = f"{metrics['S_t']:.1f}x"
-                        s_delta = ("geometric (run paired experiment "
-                                    "for measured value)")
-                    st.metric("Thermal-budget multiplier S_t",
-                               s_label, delta=s_delta, delta_color="inverse")
-                with c2:
-                    dT_lo, dT_hi = metrics['Delta_T_95CI']
-                    dT_med = metrics['Delta_T_median']
-                    if np.isfinite(dT_med) and dT_med > 0:
-                        dT_label = f"+{metrics['Delta_T_eff']:.0f} C"
-                        dT_delta = (f"95% CI: [{dT_lo:+.0f}, {dT_hi:+.0f}] C "
-                                     f"(median {dT_med:+.0f})")
-                    else:
-                        dT_label = f"+{metrics['Delta_T_eff']:.0f} C"
-                        dT_delta = f"Q_eff = {metrics['Q_eff_poly_kJmol']:.1f} kJ/mol"
-                    st.metric("Temperature penalty dT (Q_eff, exact Arrhenius)",
-                               dT_label, delta=dT_delta, delta_color="inverse")
-                with c3:
-                    st.metric("Pressure penalty S_P",
-                               f"{metrics['S_P']:.1f}x",
-                               delta=(f"poly: ~{metrics['sigma_poly_MPa']:.0f} MPa vs "
-                                      f"nc: {metrics['sigma_nc_MPa']:.0f} MPa"),
-                               delta_color="inverse")
-                with c4:
-                    cs = metrics['composite_score']
-                    st.metric("Composite MCDA Sigma",
-                               f"{cs:.2f} / 1.00",
-                               delta=f"{cs*100:.0f}% of Poly-Cu headroom",
-                               delta_color="off",
-                               help="Geometric-mean MCDA over 5 axes (energy, CO2, "
-                                    "throughput, Au utilisation, cost). 1.0 = as good "
-                                    "as Poly-Cu; <1.0 = nc-Cu advantage.")
+                if des_reached and ref_reached and t_des_reach > 1e-9:
+                    S_t_measured = t_ref_reach / t_des_reach
 
-                # =====================================================
-                # GEOMETRIC LEVER + EFFECTIVE Q
-                # =====================================================
-                st.markdown("---")
-                st.subheader("Geometric lever: phi_gb and effective Q")
-                c1, c2, c3, c4 = st.columns(4)
-                with c1:
-                    st.metric("nc-Cu grain size d", f"{d_current:.1f} nm")
-                    st.metric("nc-Cu phi_gb ~ delta/d", f"{metrics['phi_gb_nc']:.3f}")
-                with c2:
-                    st.metric("Poly-Cu grain size d_ref", f"{d_ref:.1f} nm")
-                    st.metric("Poly-Cu phi_gb ~ delta/d_ref", f"{metrics['phi_gb_poly']:.3f}")
-                with c3:
-                    st.metric("GB width delta", f"{gb_width:.2f} nm")
-                    st.metric("D_eff ratio (nc/Poly)",
-                              f"{metrics['D_eff_nc']/max(metrics['D_eff_poly'],1e-12):.1f}x")
-                with c4:
-                    st.metric("Q_eff (nc)", f"{metrics['Q_eff_nc_kJmol']:.1f} kJ/mol")
-                    st.metric("Q_eff (Poly)", f"{metrics['Q_eff_poly_kJmol']:.1f} kJ/mol")
-                st.caption(
-                    f"Bug #3 fix: dT now uses Q_eff (D-weighted average of Q_lat "
-                    f"and Q_gb) instead of Q_gb alone. With D_lat={params.get('D_lattice',0.01):.3f} "
-                    f"and D_gb={params.get('D_gb',50.0):.1f}, the GB term "
-                    f"D_gb * phi_gb dominates for both configurations, so Q_eff ~ Q_gb "
-                    f"in this regime - but the formula only reveals this if it's "
-                    f"implemented correctly.")
+                    # Build a paired_results mock from the saved diagnostics
+                    # so compute_sustainability_metrics uses the MEASURED
+                    # t_reach values instead of the geometric time-stretch.
+                    paired_results_mock = {
+                        'nc': {
+                            't_reached': float(t_des_reach),
+                            'reached': True,
+                            'c_bot': c_des,
+                            'time': t_des,
+                        },
+                        'poly': {
+                            't_reached': float(t_ref_reach),
+                            'reached': True,
+                            'c_bot': c_ref,
+                            'time': t_ref,
+                            'S_t_measured': float(S_t_measured),
+                        },
+                    }
 
-                # =====================================================
-                # ENGINEERING METRICS TABLE (Bug #1 fixed: SI seconds)
-                # =====================================================
-                st.markdown("---")
-                st.subheader("Engineering metrics (energy / CO2 / throughput)")
-                st.caption(
-                    f"All time-based quantities now use SI seconds via "
-                    f"`code_time_to_seconds(t, params)`. Current time unit: "
-                    f"**{t_unit}** -> factor {_TIME_UNIT_TO_SECONDS.get(t_unit, 1.0):.2e} s.")
-                df_eng = pd.DataFrame([
-                    {"Metric": "Bonding time per joint",
-                     "nc-Cu (as-designed)": f"{metrics['t_nc_measured']:.3g} {t_unit} "
-                                            f"({metrics['t_nc_s']:.3g} s)",
-                     "Poly-Cu (reference)": f"{metrics['t_poly_measured']:.3g} {t_unit} "
-                                            f"({metrics['t_poly_s']:.3g} s)",
-                     "Ratio Poly/nc": f"{metrics['S_t']:.1f}x"},
-                    {"Metric": "Bonding temperature",
-                     "nc-Cu (as-designed)": f"{T_bond_K-273.15:.0f} C",
-                     "Poly-Cu (reference)": f"{T_bond_K-273.15+metrics['Delta_T_eff']:.0f} C",
-                     "Ratio Poly/nc": f"+{metrics['Delta_T_eff']:.0f} C"},
-                    {"Metric": "Bonding pressure",
-                     "nc-Cu (as-designed)": f"{metrics['sigma_nc_MPa']:.0f} MPa",
-                     "Poly-Cu (reference)": f"{metrics['sigma_poly_MPa']:.0f} MPa",
-                     "Ratio Poly/nc": f"{metrics['S_P']:.1f}x"},
-                    {"Metric": "Energy per joint",
-                     "nc-Cu (as-designed)": f"{metrics['E_nc_kWh']:.3g} kWh",
-                     "Poly-Cu (reference)": f"{metrics['E_poly_kWh']:.3g} kWh",
-                     "Ratio Poly/nc": f"{metrics['energy_ratio']:.1f}x"},
-                    {"Metric": "CO2 per joint",
-                     "nc-Cu (as-designed)": f"{metrics['CO2_nc']:.3g} kg",
-                     "Poly-Cu (reference)": f"{metrics['CO2_poly']:.3g} kg",
-                     "Ratio Poly/nc": f"{metrics['co2_ratio']:.1f}x"},
-                    {"Metric": "Throughput (joints / hour)",
-                     "nc-Cu (as-designed)": f"{metrics['throughput_nc']:.1f}",
-                     "Poly-Cu (reference)": f"{metrics['throughput_poly']:.1f}",
-                     "Ratio Poly/nc": f"{1.0/max(metrics['S_t'],1e-9):.2f}x"},
-                    {"Metric": "Au utilization eta_Au",
-                     "nc-Cu (as-designed)": f"{metrics['eta_Au_nc']*100:.0f}%",
-                     "Poly-Cu (reference)": f"{metrics['eta_Au_poly']*100:.0f}%",
-                     "Ratio Poly/nc": f"{metrics['eta_Au_poly']/max(metrics['eta_Au_nc'],1e-6):.2f}x"},
-                ])
-                st.dataframe(df_eng, use_container_width=True, hide_index=True)
+                    # Ensure the design params reflect the selected design sim
+                    params_for_calc = dict(design_data['sim']['params'])
 
-                # =====================================================
-                # COST PER JOINT + BREAK-EVEN
-                # =====================================================
-                st.markdown("---")
-                st.subheader("Cost per joint (full breakdown)")
-                cn, cp = metrics['cost_nc'], metrics['cost_poly']
-                df_cost = pd.DataFrame([
-                    {"Line item": "Energy",
-                     "nc-Cu ($)": f"{cn['energy']:.6f}",
-                     "Poly-Cu ($)": f"{cp['energy']:.6f}",
-                     "Poly/nc": f"{cp['energy']/max(cn['energy'],1e-12):.2f}x"},
-                    {"Line item": "Machine (amortised)",
-                     "nc-Cu ($)": f"{cn['machine']:.6f}",
-                     "Poly-Cu ($)": f"{cp['machine']:.6f}",
-                     "Poly/nc": f"{cp['machine']/max(cn['machine'],1e-12):.2f}x"},
-                    {"Line item": "Labor",
-                     "nc-Cu ($)": f"{cn['labor']:.6f}",
-                     "Poly-Cu ($)": f"{cp['labor']:.6f}",
-                     "Poly/nc": "-"},
-                    {"Line item": "Au material",
-                     "nc-Cu ($)": f"{cn['au_material']:.6f}",
-                     "Poly-Cu ($)": f"{cp['au_material']:.6f}",
-                     "Poly/nc": "-"},
-                    {"Line item": "Cu material (with nano premium)",
-                     "nc-Cu ($)": f"{cn['cu_material']:.6f}",
-                     "Poly-Cu ($)": f"{cp['cu_material']:.6f}",
-                     "Poly/nc": f"{cp['cu_material']/max(cn['cu_material'],1e-12):.2f}x"},
-                    {"Line item": "TOTAL per joint",
-                     "nc-Cu ($)": f"{cn['total']:.6f}",
-                     "Poly-Cu ($)": f"{cp['total']:.6f}",
-                     "Poly/nc": f"{metrics['cost_ratio']:.2f}x"},
-                ])
-                st.dataframe(df_cost, use_container_width=True, hide_index=True)
-
-                c1, c2, c3 = st.columns(3)
-                with c1:
-                    st.metric("Cost ratio (Poly/nc)",
-                               f"{metrics['cost_ratio']:.2f}x")
-                with c2:
-                    be_prem = metrics['break_even_premium']
-                    st.metric("Break-even Cu premium",
-                               f"${be_prem:.2f}/kg" if np.isfinite(be_prem) else "N/A",
-                               help="At what $/kg nano-Cu premium does the energy "
-                                    "saving stop justifying the material premium?")
-                with c3:
-                    st.metric("Break-even grain size",
-                               f"{metrics['break_even_grain_size']:.0f} nm",
-                               help="Grain size at which S_t drops to 1.5x (the "
-                                    "minimum commercially defensible advantage).")
-
-                # =====================================================
-                # FIGURES (all 8)
-                # =====================================================
-                st.markdown("---")
-                st.subheader("Publication-quality figures (8)")
-                st.caption(
-                    "Each figure proves a specific claim - see the inline "
-                    "captions. All figures use `constrained_layout` and the "
-                    "project font fallback (DejaVu Sans + Noto Sans SC).")
-
-                # Build a params dict for the figures module
-                fig_params = {
-                    'D_lattice': params.get('D_lattice', 0.01),
-                    'D_gb': params.get('D_gb', 50.0),
-                    'gb_width_nm': gb_width,
-                }
-
-                # ---- Fig 1: S_t(d) ----
-                with st.expander("Fig 1 - Thermal-budget multiplier S_t(d_nc)",
-                                  expanded=True):
-                    st.caption(
-                        "Proves *why* the nc-Cu choice is on the steep part of "
-                        "the curve. Vertical orange line = break-even grain size "
-                        f"({metrics['break_even_grain_size']:.0f} nm, where S_t=1.5x). "
-                        "Red dot = current design. Blue square = Poly-Cu reference.")
-                    fig1 = fig_S_t_vs_d(fig_params, d_current, d_ref)
-                    st.pyplot(fig1); plt.close(fig1)
-
-                # ---- Fig 2: dT Arrhenius ----
-                with st.expander("Fig 2 - Arrhenius temperature penalty dT(S_t)",
-                                  expanded=False):
-                    st.caption(
-                        "Exact Arrhenius inversion (black) vs the small-dT "
-                        "linearisation (blue dashed). Shaded gap = approximation "
-                        "error. Red dot = current design point.")
-                    fig2 = fig_Delta_T_arrhenius(
-                        fig_params, metrics['S_t'], T_K=T_bond_K, Q_gb_kJ=Q_gb_kj)
-                    st.pyplot(fig2); plt.close(fig2)
-
-                # ---- Fig 3: engineering bars ----
-                with st.expander("Fig 3 - Engineering penalty factors",
-                                  expanded=False):
-                    st.caption(
-                        "The headline bar chart - goes in the paper abstract. "
-                        "Poly-Cu is uniformly penalised by S_t on time, energy, "
-                        "CO2, and Au utilisation; throughput is penalised by 1/S_t.")
-                    fig3 = fig_engineering_bars(metrics['S_t'])
-                    st.pyplot(fig3); plt.close(fig3)
-
-                # ---- Fig 4: composite MCDA radar ----
-                with st.expander("Fig 4 - Composite MCDA score (geometric mean)",
-                                  expanded=False):
-                    st.caption(
-                        "Single-number answer to 'which configuration is better "
-                        "overall?'. The geometric mean is scale-invariant and "
-                        "cannot be gamed by one dominant axis - the correct MCDA "
-                        "aggregation for ratio metrics.")
-                    fig4 = fig_composite_radar(metrics['S_t'])
-                    st.pyplot(fig4); plt.close(fig4)
-
-                # ---- Fig 5: Monte-Carlo dT ----
-                with st.expander("Fig 5 - Monte-Carlo uncertainty on dT",
-                                  expanded=False):
-                    st.caption(
-                        f"Pre-empts the reviewer who says 'but you assumed Q'. "
-                        f"8000 draws of Q ~ N(Q_gb, sigma_Q^2), clipped to "
-                        f"[0.5, 1.5] * Q_gb. The 95% CI on dT is "
-                        f"[{metrics['Delta_T_95CI'][0]:+.0f}, "
-                        f"{metrics['Delta_T_95CI'][1]:+.0f}] C.")
-                    fig5 = fig_montecarlo_DT(
-                        metrics['S_t'], T_K=T_bond_K, Q_gb_kJ=Q_gb_kj,
-                        sigma_Q_kJ=sigma_Q_kj)
-                    st.pyplot(fig5); plt.close(fig5)
-
-                # ---- Fig 6: measured kinetics ----
-                with st.expander("Fig 6 - Measured bonding kinetics",
-                                  expanded=False):
-                    if paired_results is not None:
-                        st.caption(
-                            "MEASURED <c>_Ob(t) for nc-Cu and Poly-Cu, from the "
-                            "paired experiment. No heuristic - two real runs, "
-                            "two real curves. Markers show where each run first "
-                            "hit the target <c>*.")
-                        nc_r = paired_results.get('nc', {})
-                        poly_r = paired_results.get('poly', {})
-                        t_nc = np.asarray(nc_r.get('time', []))
-                        c_nc = np.asarray(nc_r.get('c_bot', []))
-                        t_poly = np.asarray(poly_r.get('time', []))
-                        c_poly = np.asarray(poly_r.get('c_bot', []))
-                        if t_nc.size and t_poly.size:
-                            fig6 = fig_kinetics(
-                                t_nc, c_nc, t_poly, c_poly, target_c,
-                                t_unit=t_unit,
-                                nc_reached=nc_r.get('reached', False),
-                                poly_reached=poly_r.get('reached', False))
-                            st.pyplot(fig6); plt.close(fig6)
-                        else:
-                            st.warning("Paired experiment produced no trajectory data.")
-                    else:
-                        st.caption(
-                            "GEOMETRIC time-stretch (no paired run). The Poly-Cu "
-                            "curve is the nc-Cu curve stretched by S_t. Click "
-                            "'Run paired experiment' above for the measured "
-                            "comparison.")
-                        t_arr = np.asarray(solver.history['time'])
-                        c_bot_arr = np.asarray(solver.history['c_bot'])
-                        t_poly_arr = t_arr * metrics['S_t']
-                        fig6 = fig_kinetics(
-                            t_arr, c_bot_arr, t_poly_arr, c_bot_arr, target_c,
-                            t_unit=t_unit,
-                            nc_reached=metrics['nc_reached'],
-                            poly_reached=False)
-                        st.pyplot(fig6); plt.close(fig6)
-
-                # ---- Fig 7: Pareto ----
-                with st.expander("Fig 7 - Pareto: sustainability vs. cost",
-                                  expanded=False):
-                    st.caption(
-                        "Manufacturing reality check. The Pareto sweet spot "
-                        "(red star) is where total cost per joint is minimised - "
-                        "NOT at the smallest d, because the nano-premium "
-                        "outweighs the energy saving below ~40 nm. This is the "
-                        "honest engineering answer.")
-                    # Build a cost dict matching the figures module's API
-                    cost_dict = dict(
-                        batch_joints=int(batch_joints),
+                    metrics = compute_sustainability_metrics(
+                        solver_history=design_diag,
+                        params=params_for_calc,
+                        target_c=target_c,
+                        d_current=d_current,
+                        d_ref=d_ref,
+                        gb_width=gb_width,
+                        Q_gb_J=Q_gb_J,
+                        Q_lat_J=Q_lat_J,
+                        T_bond_K=T_bond_K,
+                        applied_stress_MPa=(
+                            float(params_for_calc.get('applied_stress', 30e6)) / 1e6),
                         furnace_kW=furnace_kW,
+                        grid_carbon_kg_per_kWh=grid_g,
+                        batch_joints=int(batch_joints),
                         energy_price_usd_kwh=energy_price,
                         machine_hourly_usd=machine_hourly,
                         cu_mass_kg=cu_mass_kg,
-                        bulk_cu_usd_kg=0.0,
+                        au_mass_kg=(au_mass_kg if au_mass_kg > 0 else None),
                         nano_premium_usd_kg=nano_premium,
-                        premium_decay_nm=40.0,
-                        premium_ref_nm=15.0,
-                    )
-                    fig7 = fig_pareto_grain_size(
-                        fig_params, metrics['t_nc_s'], d_current, d_ref,
-                        cost=cost_dict)
-                    st.pyplot(fig7); plt.close(fig7)
+                        sigma_Q_J=sigma_Q_J,
+                        paired_results=paired_results_mock)
 
-                # ---- Fig 8: sensitivity heatmap ----
-                with st.expander("Fig 8 - Operating window S_t(d_nc, d_ref)",
-                                  expanded=False):
+                    # ---- Primary metric cards ----
+                    c1, c2, c3, c4 = st.columns(4)
+                    with c1:
+                        st.metric(
+                            "Thermal-budget multiplier S_t (Measured)",
+                            f"{S_t_measured:.2f}x",
+                            delta=f"Reference is {S_t_measured:.1f}x slower",
+                            delta_color="inverse",
+                            help="Measured S_t = t_ref_reach / t_des_reach, "
+                                 "computed from the saved diagnostics of the "
+                                 "two selected simulations. No geometric proxy.")
+                    with c2:
+                        dT_lo, dT_hi = metrics['Delta_T_95CI']
+                        dT_med = metrics['Delta_T_median']
+                        if np.isfinite(dT_med) and dT_med > 0:
+                            dT_label = f"+{metrics['Delta_T_eff']:.0f} C"
+                            dT_delta = (f"95% CI: [{dT_lo:+.0f}, {dT_hi:+.0f}] C "
+                                        f"(median {dT_med:+.0f})")
+                        else:
+                            dT_label = f"+{metrics['Delta_T_eff']:.0f} C"
+                            dT_delta = f"Q_eff = {metrics['Q_eff_poly_kJmol']:.1f} kJ/mol"
+                        st.metric("Temperature penalty ΔT (Q_eff, exact Arrhenius)",
+                                   dT_label, delta=dT_delta, delta_color="inverse")
+                    with c3:
+                        st.metric("Pressure penalty S_P",
+                                   f"{metrics['S_P']:.1f}x",
+                                   delta=(f"poly: ~{metrics['sigma_poly_MPa']:.0f} MPa vs "
+                                          f"nc: {metrics['sigma_nc_MPa']:.0f} MPa"),
+                                   delta_color="inverse")
+                    with c4:
+                        cs = metrics['composite_score']
+                        st.metric("Composite MCDA Σ",
+                                   f"{cs:.2f} / 1.00",
+                                   delta=f"{cs*100:.0f}% of Poly-Cu headroom",
+                                   delta_color="off",
+                                   help="Geometric-mean MCDA over 5 axes (energy, CO2, "
+                                        "throughput, Au utilisation, cost). 1.0 = as good "
+                                        "as Poly-Cu; <1.0 = nc-Cu advantage.")
+
                     st.caption(
-                        "Design map: every (d_nc, d_ref) pair inside the white "
-                        "5x contour gives S_t < 5. The red star is the current "
-                        "design point.")
-                    fig8 = fig_sensitivity_heatmap(
-                        fig_params, d_nc_actual=d_current, d_ref_actual=d_ref)
-                    st.pyplot(fig8); plt.close(fig8)
+                        "Metrics computed using MEASURED t_reach from the saved "
+                        "diagnostics of the two selected simulations. Geometric "
+                        "Hart-formula proxies are overridden by actual phase-field "
+                        "kinetics.")
 
-                # =====================================================
-                # PAPER-READY SUMMARY (updated with all v3.4.16 numbers)
-                # =====================================================
-                st.markdown("---")
-                st.subheader("Paper-ready summary")
-                s_meas_str = (f"measured S_t = {metrics['S_t_measured']:.2f}"
-                               if np.isfinite(metrics['S_t_measured'])
-                               else f"geometric S_t = {metrics['S_t']:.2f}")
-                dT_med = metrics['Delta_T_median']
-                dT_lo, dT_hi = metrics['Delta_T_95CI']
-                dT_ci_str = (f" (95% CI: [{dT_lo:+.0f}, {dT_hi:+.0f}] C, "
-                              f"sigma_Q = {sigma_Q_kj:.0f} kJ/mol)"
-                              if np.isfinite(dT_med) and dT_med > 0 else "")
-                summary_text = (
-                    f"*To quantify the sustainability advantage of the nc-Cu "
-                    f"design, we extended the phase-field model with a paired "
-                    f"Poly-Cu/Au/Poly-Cu reference configuration. Because the "
-                    f"Hart effective diffusivity scales linearly with the "
-                    f"grain-boundary volume fraction phi_gb ~ 1/d, replacing the "
-                    f"{d_current:.0f} nm nc-Cu layer with {d_ref:.0f} nm Poly-Cu "
-                    f"reduces D_eff by a factor of {s_meas_str}. To reach the "
-                    f"same region-averaged Au concentration (<c>_Ob = {target_c:.2f}, "
-                    f"corresponding to {metrics['eta_Au_nc']*100:.0f}% utilization "
-                    f"of the Au inventory), the Poly-Cu reference requires either "
-                    f"(i) a {metrics['S_t']:.1f}x longer bonding time at "
-                    f"{T_bond_K-273.15:.0f} C, (ii) a +{metrics['Delta_T_eff']:.0f} C "
-                    f"temperature increase at fixed throughput (using "
-                    f"Q_eff = {metrics['Q_eff_poly_kJmol']:.1f} kJ/mol, the "
-                    f"D-weighted average of Q_gb and Q_lat){dT_ci_str}, or "
-                    f"(iii) a {metrics['S_P']:.1f}x higher bonding pressure "
-                    f"(~{metrics['sigma_poly_MPa']:.0f} MPa, impractical for "
-                    f"power modules). The composite MCDA score is "
-                    f"Sigma = {metrics['composite_score']:.2f} (geometric mean over "
-                    f"energy, CO2, throughput, Au utilisation, and cost axes). "
-                    f"The nc-Cu design therefore delivers a "
-                    f"{metrics['S_t']:.1f}x reduction in thermal energy per joint "
-                    f"({metrics['E_nc_kWh']:.2e} vs {metrics['E_poly_kWh']:.2e} kWh), "
-                    f"a {metrics['S_t']:.1f}x throughput gain, and a "
-                    f"{metrics['eta_Au_nc']/max(metrics['eta_Au_poly'],1e-6):.1f}x "
-                    f"improvement in precious-metal utilization. The cost-per-joint "
-                    f"break-even Cu premium is "
-                    f"${metrics['break_even_premium']:.2f}/kg - well above the "
-                    f"current market gap between nc-Cu and bulk Cu.*"
-                )
-                st.markdown(summary_text)
+                    # ---- Geometric lever + effective Q ----
+                    st.markdown("---")
+                    st.subheader("Geometric lever: φ_gb and effective Q")
+                    c1, c2, c3, c4 = st.columns(4)
+                    with c1:
+                        st.metric("Design grain size d", f"{d_current:.1f} nm")
+                        st.metric("Design φ_gb ≈ δ/d", f"{metrics['phi_gb_nc']:.3f}")
+                    with c2:
+                        st.metric("Reference grain size d_ref", f"{d_ref:.1f} nm")
+                        st.metric("Reference φ_gb ≈ δ/d_ref", f"{metrics['phi_gb_poly']:.3f}")
+                    with c3:
+                        st.metric("GB width δ", f"{gb_width:.2f} nm")
+                        st.metric("D_eff ratio (Design/Ref)",
+                                  f"{metrics['D_eff_nc']/max(metrics['D_eff_poly'],1e-12):.1f}x")
+                    with c4:
+                        st.metric("Q_eff (Design)", f"{metrics['Q_eff_nc_kJmol']:.1f} kJ/mol")
+                        st.metric("Q_eff (Reference)", f"{metrics['Q_eff_poly_kJmol']:.1f} kJ/mol")
+                    st.caption(
+                        f"ΔT uses Q_eff (D-weighted average of Q_lat and "
+                        f"Q_gb) instead of Q_gb alone. With D_lat="
+                        f"{params_for_calc.get('D_lattice',0.01):.3f} and D_gb="
+                        f"{params_for_calc.get('D_gb',50.0):.1f}, the GB term "
+                        f"D_gb*φ_gb dominates for both configurations, so "
+                        f"Q_eff ≈ Q_gb in this regime — but the formula "
+                        f"only reveals this if it is implemented correctly.")
 
-                # =====================================================
-                # EXPORT (JSON + Markdown)
-                # =====================================================
-                st.markdown("---")
-                st.subheader("Export sustainability report")
-                rep = build_sustainability_report(metrics, params,
-                                                    summary_text=summary_text)
-                ec1, ec2 = st.columns(2)
-                with ec1:
-                    json_bytes = json.dumps(rep, indent=2, cls=NumpyEncoder,
-                                              default=str).encode()
-                    st.download_button(
-                        "JSON report",
-                        BytesIO(json_bytes),
-                        file_name=(f"sustainability_{rep['params_hash']}.json"),
-                        mime="application/json",
-                        help="Full machine-readable report including all metrics, "
-                             "95% CI, cost breakdown, and the parameter set.")
-                with ec2:
-                    md_text = make_markdown_report(rep)
-                    st.download_button(
-                        "Markdown report",
-                        md_text,
-                        file_name=(f"sustainability_{rep['params_hash']}.md"),
-                        mime="text/markdown",
-                        help="Human-readable summary in Markdown - drop straight "
-                             "into a paper appendix or repo README.")
+                    # ---- Engineering metrics table ----
+                    st.markdown("---")
+                    st.subheader("Engineering metrics (energy / CO2 / throughput)")
+                    st.caption(
+                        f"All time-based quantities use SI seconds via "
+                        f"`code_time_to_seconds(t, params)`. Current time unit: "
+                        f"**{t_unit}** → factor "
+                        f"{_TIME_UNIT_TO_SECONDS.get(t_unit, 1.0):.2e} s.")
+                    df_eng = pd.DataFrame([
+                        {"Metric": "Bonding time per joint",
+                         "Design (nc-Cu)": f"{metrics['t_nc_measured']:.3g} {t_unit} "
+                                            f"({metrics['t_nc_s']:.3g} s)",
+                         "Reference (Poly-Cu)": f"{metrics['t_poly_measured']:.3g} {t_unit} "
+                                            f"({metrics['t_poly_s']:.3g} s)",
+                         "Ratio Ref/Design": f"{metrics['S_t']:.1f}x"},
+                        {"Metric": "Bonding temperature",
+                         "Design (nc-Cu)": f"{T_bond_K-273.15:.0f} C",
+                         "Reference (Poly-Cu)": f"{T_bond_K-273.15+metrics['Delta_T_eff']:.0f} C",
+                         "Ratio Ref/Design": f"+{metrics['Delta_T_eff']:.0f} C"},
+                        {"Metric": "Bonding pressure",
+                         "Design (nc-Cu)": f"{metrics['sigma_nc_MPa']:.0f} MPa",
+                         "Reference (Poly-Cu)": f"{metrics['sigma_poly_MPa']:.0f} MPa",
+                         "Ratio Ref/Design": f"{metrics['S_P']:.1f}x"},
+                        {"Metric": "Energy per joint",
+                         "Design (nc-Cu)": f"{metrics['E_nc_kWh']:.3g} kWh",
+                         "Reference (Poly-Cu)": f"{metrics['E_poly_kWh']:.3g} kWh",
+                         "Ratio Ref/Design": f"{metrics['energy_ratio']:.1f}x"},
+                        {"Metric": "CO2 per joint",
+                         "Design (nc-Cu)": f"{metrics['CO2_nc']:.3g} kg",
+                         "Reference (Poly-Cu)": f"{metrics['CO2_poly']:.3g} kg",
+                         "Ratio Ref/Design": f"{metrics['co2_ratio']:.1f}x"},
+                        {"Metric": "Throughput (joints / hour)",
+                         "Design (nc-Cu)": f"{metrics['throughput_nc']:.1f}",
+                         "Reference (Poly-Cu)": f"{metrics['throughput_poly']:.1f}",
+                         "Ratio Ref/Design": f"{1.0/max(metrics['S_t'],1e-9):.2f}x"},
+                        {"Metric": "Au utilization η_Au",
+                         "Design (nc-Cu)": f"{metrics['eta_Au_nc']*100:.0f}%",
+                         "Reference (Poly-Cu)": f"{metrics['eta_Au_poly']*100:.0f}%",
+                         "Ratio Ref/Design": f"{metrics['eta_Au_poly']/max(metrics['eta_Au_nc'],1e-6):.2f}x"},
+                    ])
+                    st.dataframe(df_eng, use_container_width=True, hide_index=True)
+
+                    # ---- Cost per joint + break-even ----
+                    st.markdown("---")
+                    st.subheader("Cost per joint (full breakdown)")
+                    cn, cp_m = metrics['cost_nc'], metrics['cost_poly']
+                    df_cost = pd.DataFrame([
+                        {"Line item": "Energy",
+                         "Design (nc-Cu) ($)": f"{cn['energy']:.6f}",
+                         "Reference (Poly-Cu) ($)": f"{cp_m['energy']:.6f}",
+                         "Ref/Design": f"{cp_m['energy']/max(cn['energy'],1e-12):.2f}x"},
+                        {"Line item": "Machine (amortised)",
+                         "Design (nc-Cu) ($)": f"{cn['machine']:.6f}",
+                         "Reference (Poly-Cu) ($)": f"{cp_m['machine']:.6f}",
+                         "Ref/Design": f"{cp_m['machine']/max(cn['machine'],1e-12):.2f}x"},
+                        {"Line item": "Labor",
+                         "Design (nc-Cu) ($)": f"{cn['labor']:.6f}",
+                         "Reference (Poly-Cu) ($)": f"{cp_m['labor']:.6f}",
+                         "Ref/Design": "-"},
+                        {"Line item": "Au material",
+                         "Design (nc-Cu) ($)": f"{cn['au_material']:.6f}",
+                         "Reference (Poly-Cu) ($)": f"{cp_m['au_material']:.6f}",
+                         "Ref/Design": "-"},
+                        {"Line item": "Cu material (with nano premium)",
+                         "Design (nc-Cu) ($)": f"{cn['cu_material']:.6f}",
+                         "Reference (Poly-Cu) ($)": f"{cp_m['cu_material']:.6f}",
+                         "Ref/Design": f"{cp_m['cu_material']/max(cn['cu_material'],1e-12):.2f}x"},
+                        {"Line item": "TOTAL per joint",
+                         "Design (nc-Cu) ($)": f"{cn['total']:.6f}",
+                         "Reference (Poly-Cu) ($)": f"{cp_m['total']:.6f}",
+                         "Ref/Design": f"{metrics['cost_ratio']:.2f}x"},
+                    ])
+                    st.dataframe(df_cost, use_container_width=True, hide_index=True)
+
+                    c1, c2, c3 = st.columns(3)
+                    with c1:
+                        st.metric("Cost ratio (Ref/Design)",
+                                   f"{metrics['cost_ratio']:.2f}x")
+                    with c2:
+                        be_prem = metrics['break_even_premium']
+                        st.metric("Break-even Cu premium",
+                                   f"${be_prem:.2f}/kg" if np.isfinite(be_prem) else "N/A",
+                                   help="At what $/kg nano-Cu premium does the energy "
+                                        "saving stop justifying the material premium?")
+                    with c3:
+                        st.metric("Break-even grain size",
+                                   f"{metrics['break_even_grain_size']:.0f} nm",
+                                   help="Grain size at which S_t drops to 1.5x (the "
+                                        "minimum commercially defensible advantage).")
+
+                    # =====================================================
+                    # PUBLICATION-QUALITY FIGURES (8)
+                    # =====================================================
+                    st.markdown("---")
+                    st.subheader("Publication-quality figures (8)")
+                    st.caption(
+                        "Each figure proves a specific claim — see the inline "
+                        "captions. All figures use `constrained_layout` and the "
+                        "project font fallback (DejaVu Sans + Noto Sans SC). "
+                        "Data-driven: S_t is the measured value from the saved "
+                        "diagnostics of the two selected simulations.")
+
+                    fig_params = {
+                        'D_lattice': params_for_calc.get('D_lattice', 0.01),
+                        'D_gb': params_for_calc.get('D_gb', 50.0),
+                        'gb_width_nm': gb_width,
+                    }
+
+                    # ---- Fig 1: S_t(d) ----
+                    with st.expander("Fig 1 — Thermal-budget multiplier S_t(d)",
+                                      expanded=True):
+                        st.caption(
+                            "Proves *why* the nc-Cu choice is on the steep part of "
+                            "the curve. Vertical orange line = break-even grain size "
+                            f"({metrics['break_even_grain_size']:.0f} nm, where S_t=1.5x). "
+                            "Red dot = current design. Blue square = Poly-Cu reference.")
+                        fig1 = fig_S_t_vs_d(fig_params, d_current, d_ref)
+                        st.pyplot(fig1); plt.close(fig1)
+
+                    # ---- Fig 2: dT Arrhenius ----
+                    with st.expander("Fig 2 — Arrhenius temperature penalty ΔT(S_t)",
+                                      expanded=False):
+                        st.caption(
+                            "Exact Arrhenius inversion (black) vs the small-ΔT "
+                            "linearisation (blue dashed). Shaded gap = approximation "
+                            "error. Red dot = current design point (measured S_t).")
+                        fig2 = fig_Delta_T_arrhenius(
+                            fig_params, metrics['S_t'], T_K=T_bond_K, Q_gb_kJ=Q_gb_kj)
+                        st.pyplot(fig2); plt.close(fig2)
+
+                    # ---- Fig 3: engineering bars ----
+                    with st.expander("Fig 3 — Engineering penalty factors",
+                                      expanded=False):
+                        st.caption(
+                            "The headline bar chart — goes in the paper abstract. "
+                            "Poly-Cu is uniformly penalised by S_t on time, energy, "
+                            "CO2, and Au utilisation; throughput is penalised by 1/S_t. "
+                            "S_t here is the MEASURED value from saved diagnostics.")
+                        fig3 = fig_engineering_bars(metrics['S_t'])
+                        st.pyplot(fig3); plt.close(fig3)
+
+                    # ---- Fig 4: composite MCDA radar ----
+                    with st.expander("Fig 4 — Composite MCDA score (geometric mean)",
+                                      expanded=False):
+                        st.caption(
+                            "Single-number answer to 'which configuration is better "
+                            "overall?'. The geometric mean is scale-invariant and "
+                            "cannot be gamed by one dominant axis — the correct MCDA "
+                            "aggregation for ratio metrics.")
+                        fig4 = fig_composite_radar(metrics['S_t'])
+                        st.pyplot(fig4); plt.close(fig4)
+
+                    # ---- Fig 5: Monte-Carlo dT ----
+                    with st.expander("Fig 5 — Monte-Carlo uncertainty on ΔT",
+                                      expanded=False):
+                        st.caption(
+                            f"Pre-empts the reviewer who says 'but you assumed Q'. "
+                            f"8000 draws of Q ~ N(Q_gb, σ_Q²), clipped to "
+                            f"[0.5, 1.5] * Q_gb. The 95% CI on ΔT is "
+                            f"[{metrics['Delta_T_95CI'][0]:+.0f}, "
+                            f"{metrics['Delta_T_95CI'][1]:+.0f}] C.")
+                        fig5 = fig_montecarlo_DT(
+                            metrics['S_t'], T_K=T_bond_K, Q_gb_kJ=Q_gb_kj,
+                            sigma_Q_kJ=sigma_Q_kj)
+                        st.pyplot(fig5); plt.close(fig5)
+
+                    # ---- Fig 6: measured kinetics ----
+                    with st.expander("Fig 6 — Measured bonding kinetics",
+                                      expanded=True):
+                        st.caption(
+                            "MEASURED <c>_Ob(t) for the Design (nc-Cu) and "
+                            "Reference (Poly-Cu) simulations, pulled from their "
+                            "saved 1D diagnostics. No heuristic — two real "
+                            "saved runs, two real curves. Markers show where each "
+                            "run first hit the target <c>*.")
+                        if t_des.size > 0 and t_ref.size > 0:
+                            fig6 = fig_kinetics(
+                                t_des, c_des, t_ref, c_ref, target_c,
+                                t_unit=t_unit,
+                                nc_reached=des_reached,
+                                poly_reached=ref_reached)
+                            st.pyplot(fig6); plt.close(fig6)
+                        else:
+                            st.warning("One or both selected runs have no "
+                                       "trajectory data in their diagnostics.")
+
+                    # ---- Fig 7: Pareto ----
+                    with st.expander("Fig 7 — Pareto: sustainability vs. cost",
+                                      expanded=False):
+                        st.caption(
+                            "Manufacturing reality check. The Pareto sweet spot "
+                            "(red star) is where total cost per joint is minimised — "
+                            "NOT at the smallest d, because the nano-premium "
+                            "outweighs the energy saving below ~40 nm. This is the "
+                            "honest engineering answer.")
+                        cost_dict = dict(
+                            batch_joints=int(batch_joints),
+                            furnace_kW=furnace_kW,
+                            energy_price_usd_kwh=energy_price,
+                            machine_hourly_usd=machine_hourly,
+                            cu_mass_kg=cu_mass_kg,
+                            bulk_cu_usd_kg=0.0,
+                            nano_premium_usd_kg=nano_premium,
+                            premium_decay_nm=40.0,
+                            premium_ref_nm=15.0,
+                        )
+                        fig7 = fig_pareto_grain_size(
+                            fig_params, metrics['t_nc_s'], d_current, d_ref,
+                            cost=cost_dict)
+                        st.pyplot(fig7); plt.close(fig7)
+
+                    # ---- Fig 8: sensitivity heatmap ----
+                    with st.expander("Fig 8 — Operating window S_t(d, d_ref)",
+                                      expanded=False):
+                        st.caption(
+                            "Design map: every (d, d_ref) pair inside the white "
+                            "5x contour gives S_t < 5. The red star is the current "
+                            "design point.")
+                        fig8 = fig_sensitivity_heatmap(
+                            fig_params, d_nc_actual=d_current, d_ref_actual=d_ref)
+                        st.pyplot(fig8); plt.close(fig8)
+
+                    # =====================================================
+                    # MULTI-RUN PARETO SWEEP (data-driven)
+                    # =====================================================
+                    st.markdown("---")
+                    st.subheader("6. Multi-run Pareto sweep (data-driven)")
+                    st.caption(
+                        "Select multiple saved runs with varying <d> to build a "
+                        "data-driven Pareto front from your actual simulation "
+                        "results. Each point is the MEASURED time-to-target for "
+                        "that run's grain size — no geometric proxy.")
+
+                    multi_select = st.multiselect(
+                        "Select runs for sweep",
+                        range(len(sim_options)),
+                        format_func=lambda i: sim_options[i]['label'],
+                        key="sus_sweep_select")
+
+                    if multi_select:
+                        sweep_data = []
+                        for idx_sel in multi_select:
+                            sd = sim_options[idx_sel]
+                            diag = sd['sim'].get('diagnostics', {})
+                            t_sw = np.array(diag.get('time', []))
+                            c_sw = np.array(diag.get('c_bot', []))
+                            t_r, reached = _time_to_target(t_sw, c_sw, target_c)
+                            sweep_data.append({
+                                'd (nm)': sd['d'],
+                                'Type': classify_substrate(sd['d']),
+                                't_reach': (float(t_r) if np.isfinite(t_r)
+                                            else float('nan')),
+                                'Reached Target': reached,
+                                'sim_id': sd['id'],
+                            })
+
+                        if sweep_data:
+                            df_sweep = pd.DataFrame(sweep_data).sort_values('d (nm)')
+                            st.dataframe(df_sweep, use_container_width=True,
+                                         hide_index=True)
+
+                            # Plot data-driven t_reach vs d
+                            df_plot = df_sweep[df_sweep['Reached Target']].copy()
+                            if not df_plot.empty:
+                                fig, ax = plt.subplots(figsize=(9, 5))
+                                ax.loglog(df_plot['d (nm)'], df_plot['t_reach'],
+                                          'o-', color='darkgreen', lw=2, ms=9,
+                                          label='Measured t_reach')
+                                ax.set_xlabel("Average grain size <d> (nm)")
+                                ax.set_ylabel(f"Time to reach target ({t_unit})")
+                                ax.axvline(100, color='gray', ls='--', alpha=0.5,
+                                           label='nc / Poly threshold (100 nm)')
+                                ax.legend()
+                                ax.grid(True, which='both', alpha=0.3)
+                                ax.set_title("Data-driven t_reach(d) from saved simulations")
+                                st.pyplot(fig); plt.close(fig)
+                            else:
+                                st.info("No selected runs reached the target "
+                                        f"<c>*={target_c:.3f}. Lower the target "
+                                        "threshold or increase n_steps.")
+                    else:
+                        st.caption("Select one or more runs above to build the "
+                                   "t_reach(d) sweep plot.")
+
+                    # =====================================================
+                    # PAPER-READY SUMMARY
+                    # =====================================================
+                    st.markdown("---")
+                    st.subheader("Paper-ready summary")
+                    s_meas_str = (f"measured S_t = {metrics['S_t_measured']:.2f}"
+                                   if np.isfinite(metrics['S_t_measured'])
+                                   else f"geometric S_t = {metrics['S_t']:.2f}")
+                    dT_med = metrics['Delta_T_median']
+                    dT_lo, dT_hi = metrics['Delta_T_95CI']
+                    dT_ci_str = (f" (95% CI: [{dT_lo:+.0f}, {dT_hi:+.0f}] C, "
+                                  f"σ_Q = {sigma_Q_kj:.0f} kJ/mol)"
+                                  if np.isfinite(dT_med) and dT_med > 0 else "")
+                    summary_text = (
+                        f"*To quantify the sustainability advantage of the nc-Cu "
+                        f"design, we compared two saved phase-field runs — a "
+                        f"{d_current:.0f} nm nc-Cu design and a {d_ref:.0f} nm "
+                        f"Poly-Cu reference — using their measured 1D diagnostics "
+                        f"(time-series of region-averaged Au concentration). Because "
+                        f"the Hart effective diffusivity scales linearly with the "
+                        f"grain-boundary volume fraction φ_gb ≈ 1/d, replacing "
+                        f"the {d_current:.0f} nm nc-Cu layer with {d_ref:.0f} nm Poly-Cu "
+                        f"reduces D_eff by a factor of {s_meas_str}. To reach the "
+                        f"same region-averaged Au concentration (<c>_Ob = {target_c:.2f}, "
+                        f"corresponding to {metrics['eta_Au_nc']*100:.0f}% utilization "
+                        f"of the Au inventory), the Poly-Cu reference requires either "
+                        f"(i) a {metrics['S_t']:.1f}x longer bonding time at "
+                        f"{T_bond_K-273.15:.0f} C, (ii) a +{metrics['Delta_T_eff']:.0f} C "
+                        f"temperature increase at fixed throughput (using "
+                        f"Q_eff = {metrics['Q_eff_poly_kJmol']:.1f} kJ/mol, the "
+                        f"D-weighted average of Q_gb and Q_lat){dT_ci_str}, or "
+                        f"(iii) a {metrics['S_P']:.1f}x higher bonding pressure "
+                        f"(~{metrics['sigma_poly_MPa']:.0f} MPa, impractical for "
+                        f"power modules). The composite MCDA score is "
+                        f"Σ = {metrics['composite_score']:.2f} (geometric mean over "
+                        f"energy, CO2, throughput, Au utilisation, and cost axes). "
+                        f"The nc-Cu design therefore delivers a "
+                        f"{metrics['S_t']:.1f}x reduction in thermal energy per joint "
+                        f"({metrics['E_nc_kWh']:.2e} vs {metrics['E_poly_kWh']:.2e} kWh), "
+                        f"a {metrics['S_t']:.1f}x throughput gain, and a "
+                        f"{metrics['eta_Au_nc']/max(metrics['eta_Au_poly'],1e-6):.1f}x "
+                        f"improvement in precious-metal utilization. The cost-per-joint "
+                        f"break-even Cu premium is "
+                        f"${metrics['break_even_premium']:.2f}/kg — well above the "
+                        f"current market gap between nc-Cu and bulk Cu.*"
+                    )
+                    st.markdown(summary_text)
+
+                    # =====================================================
+                    # EXPORT (JSON + Markdown)
+                    # =====================================================
+                    st.markdown("---")
+                    st.subheader("Export sustainability report")
+                    rep = build_sustainability_report(metrics, params_for_calc,
+                                                       summary_text=summary_text)
+                    ec1, ec2 = st.columns(2)
+                    with ec1:
+                        json_bytes = json.dumps(rep, indent=2, cls=NumpyEncoder,
+                                                  default=str).encode()
+                        st.download_button(
+                            "JSON report",
+                            BytesIO(json_bytes),
+                            file_name=(f"sustainability_{rep['params_hash']}.json"),
+                            mime="application/json",
+                            help="Full machine-readable report including all metrics, "
+                                 "95% CI, cost breakdown, and the parameter set.")
+                    with ec2:
+                        md_text = make_markdown_report(rep)
+                        st.download_button(
+                            "Markdown report",
+                            md_text,
+                            file_name=(f"sustainability_{rep['params_hash']}.md"),
+                            mime="text/markdown",
+                            help="Human-readable summary in Markdown — drop straight "
+                                 "into a paper appendix or repo README.")
+
+                else:
+                    # Cannot compute measured S_t
+                    st.warning(
+                        f"⚠️ Cannot compute measured S_t — one or both "
+                        f"selected runs did not reach the target "
+                        f"<c>*={target_c:.3f} within their saved trajectories. "
+                        f"Design reached: {des_reached}. Reference reached: "
+                        f"{ref_reached}. To fix: increase n_steps, lower the target "
+                        f"threshold, or select simulations that did reach the target.")
+
+                    # Still show what we have
+                    if t_des.size > 0:
+                        st.caption(f"Design max <c>_Ob = {float(np.max(c_des)):.4f} "
+                                   f"(target {target_c:.3f})")
+                    if t_ref.size > 0:
+                        st.caption(f"Reference max <c>_Ob = {float(np.max(c_ref)):.4f} "
+                                   f"(target {target_c:.3f})")
 
     # ==================================================================
     elif mode == "Single Simulation View" and st.session_state.get('view_id'):
@@ -7155,71 +7334,163 @@ def main():
             st.warning("No valid simulations selected.")
         else:
             st.header(f"Comparing {len(sims)} simulations")
-            field = st.selectbox("Field",
-                                  list(FIELD_DEFAULT_CMAPS.keys()),
-                                  index=0, key="cmp_field")
-            fs_cmp = viz_cfg['field_settings'].get(field, {})
-            cmap_name = fs_cmp.get('cmap', FIELD_DEFAULT_CMAPS.get(field, 'viridis'))
-            cmap = ColormapRegistry.resolve(cmap_name,
-                                             invert=fs_cmp.get('invert', False))
 
-            # v3.3: unified bounds for the comparison grid
-            all_vals = []
-            for sim in sims:
-                h = sim['results_history']
-                if h and field in h[-1]:
-                    dd, _ = _rescale_field(field, h[-1][field])
-                    finite = dd[np.isfinite(dd)]
-                    if finite.size:
-                        all_vals.append(finite)
+            # v3.4.17: Mode selector — Spatial (last frame) OR Temporal (kinetics)
+            cmp_mode = st.radio(
+                "Comparison mode",
+                ["Spatial (Last Frame)", "Temporal (Kinetics)"],
+                horizontal=True,
+                key="cmp_mode",
+                help=("Spatial: side-by-side 2D field maps of the last saved "
+                      "frame. Temporal: overlay <c>_Ob(t) curves from the saved "
+                      "1D diagnostics, with time-to-target markers — the "
+                      "data-driven way to compare bonding kinetics across "
+                      "grain sizes."))
 
-            if not fs_cmp.get('auto', True):
-                # User-provided override — respect it exactly
-                drng = FIELD_DEFAULT_RNG.get(field, (0.0, 1.0))
-                vmin_g = (fs_cmp.get('vmin') if fs_cmp.get('vmin') is not None
-                          else drng[0])
-                vmax_g = (fs_cmp.get('vmax') if fs_cmp.get('vmax') is not None
-                          else drng[1])
-            elif field in FIELD_DEFAULT_RNG:
-                vmin_g, vmax_g = FIELD_DEFAULT_RNG[field]
-            elif all_vals:
-                stack = np.concatenate(all_vals)
-                vmin_g = float(np.percentile(stack, 2))
-                vmax_g = float(np.percentile(stack, 98))
-                if field == 'sigma_h':
-                    zm = max(abs(vmin_g), abs(vmax_g))
-                    vmin_g, vmax_g = -zm, zm
-            else:
-                vmin_g, vmax_g = None, None
+            if cmp_mode == "Spatial (Last Frame)":
+                field = st.selectbox("Field",
+                                      list(FIELD_DEFAULT_CMAPS.keys()),
+                                      index=0, key="cmp_field")
+                fs_cmp = viz_cfg['field_settings'].get(field, {})
+                cmap_name = fs_cmp.get('cmap', FIELD_DEFAULT_CMAPS.get(field, 'viridis'))
+                cmap = ColormapRegistry.resolve(cmap_name,
+                                                 invert=fs_cmp.get('invert', False))
 
-            cols = min(3, len(sims))
-            rows = (len(sims) + cols - 1) // cols
-            fig, axes = plt.subplots(rows, cols, figsize=(5 * cols, 4 * rows))
-            axes = np.array(axes).flatten()
+                # v3.3: unified bounds for the comparison grid
+                all_vals = []
+                for sim in sims:
+                    h = sim['results_history']
+                    if h and field in h[-1]:
+                        dd, _ = _rescale_field(field, h[-1][field])
+                        finite = dd[np.isfinite(dd)]
+                        if finite.size:
+                            all_vals.append(finite)
 
-            for i, sim in enumerate(sims):
-                p = sim['params']
-                h = sim['results_history']
-                if not h:
-                    continue
-                last = h[-1]
-                if field not in last:
-                    continue
-                d, unit = _rescale_field(field, last[field])
-                extent = [-p['Nx']*p['dx']/2, p['Nx']*p['dx']/2,
-                          -p['Ny']*p['dy']/2, p['Ny']*p['dy']/2]
-                ax = axes[i]
-                interp = 'nearest' if field in DISCRETE_FIELDS else 'bilinear'
-                im = ax.imshow(d, extent=extent, origin='lower', cmap=cmap,
-                               vmin=vmin_g, vmax=vmax_g,
-                               interpolation=interp, aspect='equal')
-                ax.set_title(f"{sim['id']} — {field}")
-                if field != 'grain_map':
-                    plt.colorbar(im, ax=ax, fraction=0.046)
-            for k in range(len(sims), len(axes)):
-                axes[k].axis('off')
-            plt.tight_layout()
-            st.pyplot(fig); plt.close(fig)
+                if not fs_cmp.get('auto', True):
+                    # User-provided override — respect it exactly
+                    drng = FIELD_DEFAULT_RNG.get(field, (0.0, 1.0))
+                    vmin_g = (fs_cmp.get('vmin') if fs_cmp.get('vmin') is not None
+                              else drng[0])
+                    vmax_g = (fs_cmp.get('vmax') if fs_cmp.get('vmax') is not None
+                              else drng[1])
+                elif field in FIELD_DEFAULT_RNG:
+                    vmin_g, vmax_g = FIELD_DEFAULT_RNG[field]
+                elif all_vals:
+                    stack = np.concatenate(all_vals)
+                    vmin_g = float(np.percentile(stack, 2))
+                    vmax_g = float(np.percentile(stack, 98))
+                    if field == 'sigma_h':
+                        zm = max(abs(vmin_g), abs(vmax_g))
+                        vmin_g, vmax_g = -zm, zm
+                else:
+                    vmin_g, vmax_g = None, None
+
+                cols = min(3, len(sims))
+                rows = (len(sims) + cols - 1) // cols
+                fig, axes = plt.subplots(rows, cols, figsize=(5 * cols, 4 * rows))
+                axes = np.array(axes).flatten()
+
+                for i, sim in enumerate(sims):
+                    p = sim['params']
+                    h = sim['results_history']
+                    if not h:
+                        continue
+                    last = h[-1]
+                    if field not in last:
+                        continue
+                    d, unit = _rescale_field(field, last[field])
+                    extent = [-p['Nx']*p['dx']/2, p['Nx']*p['dx']/2,
+                              -p['Ny']*p['dy']/2, p['Ny']*p['dy']/2]
+                    ax = axes[i]
+                    interp = 'nearest' if field in DISCRETE_FIELDS else 'bilinear'
+                    im = ax.imshow(d, extent=extent, origin='lower', cmap=cmap,
+                                   vmin=vmin_g, vmax=vmax_g,
+                                   interpolation=interp, aspect='equal')
+                    ax.set_title(f"{sim['id']} — {field}")
+                    if field != 'grain_map':
+                        plt.colorbar(im, ax=ax, fraction=0.046)
+                for k in range(len(sims), len(axes)):
+                    axes[k].axis('off')
+                plt.tight_layout()
+                st.pyplot(fig); plt.close(fig)
+
+            else:  # Temporal (Kinetics)
+                st.subheader("Temporal evolution: <c>_Ob(t)")
+                st.caption(
+                    "Comparing bonding kinetics across different grain sizes. "
+                    "Each curve is the region-averaged Au concentration in the "
+                    "bottom layer, pulled from the saved 1D diagnostics "
+                    "(`solver.history`). Substrate type is auto-classified: "
+                    "d < 100 nm = nc-Cu; d >= 100 nm = Poly-Cu. Dashed line "
+                    "= target threshold; circles mark time-to-target.")
+
+                target_c_cmp = st.slider(
+                    "Target <c>*", 0.01, 0.20, 0.06, 0.005,
+                    key="cmp_target",
+                    help="Region-averaged Au concentration threshold. The "
+                         "time-to-target marker shows when each run first "
+                         "crossed this value.")
+
+                # Check which sims have diagnostics
+                sims_with_diag = [(i, s) for i, s in enumerate(sims)
+                                   if s.get('diagnostics')]
+                if not sims_with_diag:
+                    st.warning(
+                        "⚠️ None of the selected simulations have "
+                        "saved 1D diagnostics. This happens for runs saved "
+                        "before v3.4.17. Re-run and save to populate the "
+                        "diagnostics, then return here to see the temporal "
+                        "comparison.")
+                else:
+                    missing = len(sims) - len(sims_with_diag)
+                    if missing > 0:
+                        st.caption(
+                            f"Note: {missing} of {len(sims)} selected runs "
+                            f"have no saved diagnostics and are omitted from "
+                            f"the temporal plot.")
+
+                    fig, ax = plt.subplots(figsize=(10, 6))
+                    colors = plt.cm.tab10(np.linspace(0, 1, max(len(sims_with_diag), 1)))
+
+                    any_plotted = False
+                    t_unit_cmp = ""
+                    for k, (orig_idx, sim) in enumerate(sims_with_diag):
+                        diag = sim.get('diagnostics', {})
+                        t = np.array(diag.get('time', []))
+                        c_bot = np.array(diag.get('c_bot', []))
+                        if t.size == 0 or c_bot.size == 0:
+                            continue
+                        any_plotted = True
+                        d_val = float(sim['params'].get('nc_grain_size_nm', 0))
+                        sub_type = classify_substrate(d_val)
+                        t_unit_cmp = get_time_unit_label(sim['params'])
+                        label = f"d={d_val:.0f} nm ({sub_type})"
+                        ax.plot(t, c_bot, color=colors[k], lw=2.5, label=label)
+                        # Mark time-to-target
+                        t_cross, reached = _time_to_target(t, c_bot, target_c_cmp)
+                        if reached:
+                            ax.plot(t_cross, target_c_cmp, 'o',
+                                    color=colors[k], ms=10, zorder=5)
+                            ax.annotate(
+                                f"t={t_cross:.2f}",
+                                (t_cross, target_c_cmp),
+                                textcoords="offset points", xytext=(0, 10),
+                                ha='center', fontsize=8, color=colors[k])
+
+                    if any_plotted:
+                        ax.axhline(target_c_cmp, color='k', ls='--', lw=1.5,
+                                   label=f'Target {target_c_cmp:.3f}')
+                        ax.set_xlabel(f"Time ({t_unit_cmp})")
+                        ax.set_ylabel("Region-averaged <c>_Ob (bottom layer)")
+                        ax.set_title("Bonding kinetics across grain sizes "
+                                     "(data-driven)")
+                        ax.legend(loc='best', fontsize=9)
+                        ax.grid(True, alpha=0.3)
+                        st.pyplot(fig); plt.close(fig)
+                    else:
+                        plt.close(fig)
+                        st.info("No trajectory data could be extracted from "
+                                "the selected runs.")
 
 
 if __name__ == "__main__":
