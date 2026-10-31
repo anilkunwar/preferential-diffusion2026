@@ -11,6 +11,8 @@
 
 [![continuummodelnt2d](https://img.shields.io/badge/audiff16-streamlit-blue)](https://preferential-au-diffusion16.streamlit.app/) (figure customization, temporal features, limiting the edges of colorscale bars, c variable annotated properly within the calculation framework, customization of the visualizations, diffusion correction  and  simulation produced stable results , basic code, geometry change of domain from square to rectangle)
 
+16d uses the same economic valuation of different sized substrate. 16c consideres <d>=60 nm costlier than <d>=120 nm.
+
 
 # Sustainability — Implementation README
 
