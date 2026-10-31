@@ -7762,7 +7762,7 @@ def main():
                         st.caption(
                             "Proves *why* the nc-Cu choice is on the steep part of "
                             "the curve. Vertical orange line = break-even grain size "
-                            f"({metrics['break_even_grain_size']:.0f} nm, where S_t=1.5x). "
+                            f"({d_ref / 1.5:.0f} nm, where S_t=1.5x). "
                             "Red dot = current design. Blue square = Poly-Cu reference.")
                         fig1 = fig_S_t_vs_d(fig_params, d_current, d_ref, sus_fc=sus_fc)
                         _buf_fig1, _ext_fig1, _mime_fig1 = save_figure_to_buffer(fig1, sus_fc)
