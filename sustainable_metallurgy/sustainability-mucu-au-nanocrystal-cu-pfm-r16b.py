@@ -4964,28 +4964,59 @@ def main():
             # size value to compute phi_gb = delta / d. The classification
             # (nc-Cu vs Poly-Cu) is purely a visual auto-label.
             st.markdown("**🌱 Bottom substrate average grain size <d>**")
+            # v3.4.19: Synced slider + number_input. Uses on_change callbacks
+            # + st.rerun() to sync both directions. Streamlit does NOT allow
+            # writing to a widget's session_state key AFTER the widget is
+            # instantiated. So:
+            #  - Slider on_change can safely update the number_input key
+            #    (the number_input hasn't been rendered yet when the callback
+            #    fires, since it comes after the slider).
+            #  - Number_input on_change sets a flag + st.rerun(). At the top
+            #    of the next run (before the slider renders), the flag is
+            #    checked and the slider key is synced.
+            if 'bottom_d' not in st.session_state:
+                st.session_state['bottom_d'] = 15.0
+            # Before rendering: sync slider key from a previous number_input
+            # change. This is safe because the slider hasn't been instantiated
+            # yet in this run.
+            if st.session_state.pop('_bottom_d_need_sync', False):
+                st.session_state['bottom_d_key'] = st.session_state['bottom_d']
+
+            def _on_bottom_d_slider():
+                """Slider changed: update shared state + number_input key."""
+                v = st.session_state['bottom_d_key']
+                st.session_state['bottom_d'] = v
+                st.session_state['bottom_d_num'] = v  # safe: not yet rendered
+
+            def _on_bottom_d_num():
+                """Number_input changed: update shared state, flag for slider
+                sync on next run, then rerun immediately."""
+                v = st.session_state['bottom_d_num']
+                st.session_state['bottom_d'] = v
+                st.session_state['_bottom_d_need_sync'] = True
+                st.rerun()
+
             bc1, bc2 = st.columns([3, 1])
             with bc1:
                 # v3.4.19: Slider step reduced to 0.1 for decimal precision.
                 bottom_d = st.slider(
                     "Average grain size <d> (nm)", 5.0, 1000.0, 15.0, 0.1,
                     key="bottom_d_key",
+                    on_change=_on_bottom_d_slider,
                     help="Sets the grain size of the bottom Cu layer. "
                          "Automatically classified: < 100 nm = Nanocrystalline "
                          "(nc-Cu); >= 100 nm = Polycrystalline (Poly-Cu).")
             with bc2:
                 st.caption("Exact value (nm)")
-                bottom_d_exact = st.number_input(
-                    "Exact value", value=float(bottom_d),
+                st.number_input(
+                    "Exact value", value=15.0,
                     min_value=5.0, max_value=1000.0, step=0.1, format="%.1f",
+                    key="bottom_d_num",
+                    on_change=_on_bottom_d_num,
                     label_visibility="collapsed",
                     help="Type an exact decimal value. Syncs with the slider.")
-            # Sync: if the number_input differs from the slider, prefer
-            # the number_input value and update the slider for next render.
-            if abs(bottom_d_exact - bottom_d) > 1e-9:
-                bottom_d = float(bottom_d_exact)
-                st.session_state["bottom_d_key"] = float(bottom_d_exact)
-                st.rerun()
+            # Source of truth is the shared state
+            bottom_d = st.session_state['bottom_d']
             if bottom_d < 100.0:
                 bottom_type_label = "Nanocrystalline (nc-Cu)"
             else:
